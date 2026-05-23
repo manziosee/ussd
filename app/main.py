@@ -1,15 +1,22 @@
 """
 SmartAssist USSD — FastAPI application entry point.
 
-Startup:
-  1. Connect to Redis
-  2. Create DB tables (idempotent)
-  3. Register routers
+Startup sequence
+────────────────
+1. Validate critical environment variables (fail fast, clear error message)
+2. Connect to Redis
+3. Create / migrate DB tables
+4. Seed the offline knowledge cache (16 pre-written USSD responses)
+5. Register API routers
 
-Shutdown:
-  1. Close Redis connection
+Shutdown
+────────
+1. Close Redis connection pool
 """
+from __future__ import annotations
+
 import logging
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -19,23 +26,54 @@ from fastapi.responses import JSONResponse
 from .config import get_settings
 from .database import create_tables
 from .services.session_service import init_redis, close_redis
+from .services.knowledge_service import seed_knowledge_cache
 from .routes.ussd import router as ussd_router
 from .routes.admin import router as admin_router
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
 settings = get_settings()
 
 
+def _validate_env() -> None:
+    """Fail fast with a clear message if required secrets are missing."""
+    errors: list[str] = []
+
+    if not settings.anthropic_api_key:
+        errors.append("  • ANTHROPIC_API_KEY is not set")
+    if not settings.at_api_key:
+        errors.append("  • AT_API_KEY (Africa's Talking) is not set")
+    if settings.secret_key == "change-this-in-production" and not settings.debug:
+        errors.append("  • SECRET_KEY must be changed for production")
+
+    if errors:
+        log.warning(
+            "⚠  Missing or default configuration values:\n%s\n"
+            "   Copy .env.example → .env and fill in the values.",
+            "\n".join(errors),
+        )
+        # Only hard-fail on the AI key — SMS is optional; other keys degrade gracefully
+        if not settings.anthropic_api_key:
+            log.error("ANTHROPIC_API_KEY is required. Aborting.")
+            sys.exit(1)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────────
-    log.info("Starting %s v%s", settings.app_name, settings.app_version)
+    log.info("═══ Starting %s v%s ═══", settings.app_name, settings.app_version)
+
+    _validate_env()
+
     await init_redis()
     await create_tables()
+    await seed_knowledge_cache()
+
+    log.info("✓ All systems ready — listening for USSD requests.")
     yield
     # ── Shutdown ─────────────────────────────────────────────────────────────
     log.info("Shutting down…")
@@ -46,15 +84,17 @@ app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     description=(
-        "AI-powered USSD assistant for African users. "
-        "Integrates with Africa's Talking for USSD/SMS and Claude (Anthropic) for AI."
+        "**SmartAssist USSD** — AI-powered USSD assistant for African users.\n\n"
+        "Any mobile phone (including feature phones with no internet) can access "
+        "Claude AI by dialling a USSD shortcode.\n\n"
+        "**Tech stack:** FastAPI · Claude Haiku · Africa's Talking · Redis · PostgreSQL"
     ),
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
 )
 
-# CORS — allow all origins for dev; tighten in production
+# CORS — tighten allow_origins in production
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -62,16 +102,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Routers
+# ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(ussd_router)
 app.include_router(admin_router)
 
 
-@app.get("/", tags=["Health"])
+# ── Root & health ─────────────────────────────────────────────────────────────
+
+@app.get("/", tags=["Health"], summary="Service info")
 async def root():
-    return {"service": settings.app_name, "version": settings.app_version, "status": "ok"}
+    return {
+        "service": settings.app_name,
+        "version": settings.app_version,
+        "status": "ok",
+        "docs": "/docs",
+    }
 
 
-@app.get("/health", tags=["Health"])
+@app.get("/health", tags=["Health"], summary="Health check")
 async def health():
-    return JSONResponse({"status": "ok"})
+    """
+    Returns 200 OK when the service is up.
+    Suitable for load balancer / Docker health checks.
+    """
+    return JSONResponse({"status": "ok", "service": settings.app_name})

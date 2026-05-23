@@ -1,36 +1,47 @@
 """
-USSD menu state machine.
+USSD menu state machine — core logic of SmartAssist.
 
-Africa's Talking sends a POST with:
-  sessionId, serviceCode, phoneNumber, text (accumulated, *-separated)
+Africa's Talking sends POST /ussd with:
+  sessionId, serviceCode, phoneNumber, text (all inputs, *-separated)
 
-We return:  "CON <text>" to continue the session (show next menu / prompt)
-            "END <text>" to end the session
+We return:
+  "CON <text>"  →  keep session open  (user sees menu + can respond)
+  "END <text>"  →  close session      (user sees final message)
 
-Menu tree:
+Menu tree
+─────────
   Main Menu
-  ├── 1. Business  → tips + free question
-  ├── 2. Farming   → tips + free question
-  ├── 3. Health    → tips + free question
-  ├── 4. Education → tips + free question
-  ├── 5. Ask AI    → free-form question
-  └── 6. Account   → stats, set name, set profession
+  ├─ 1. Business   →  4 pre-defined tips + free question
+  ├─ 2. Farming    →  4 pre-defined tips + free question
+  ├─ 3. Health     →  4 pre-defined tips + free question
+  ├─ 4. Education  →  4 pre-defined tips + free question
+  ├─ 5. Ask AI     →  free-form question
+  └─ 6. Account    →  stats · set name · set profession
+
+Bug notes
+─────────
+_log_interaction_bg() creates its OWN DB session (AsyncSessionLocal) so it
+is safe to fire-and-forget via asyncio.create_task; it no longer shares the
+request-scoped session that closes when the HTTP response is sent.
 """
+from __future__ import annotations
+
 import asyncio
 import logging
 
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models.user import User
-from ..models.interaction import Interaction
-from ..services import ai_service, sms_service, session_service
 from ..config import get_settings
+from ..database import AsyncSessionLocal
+from ..models.interaction import Interaction
+from ..models.user import User
+from ..services import ai_service, session_service, sms_service
 
 log = logging.getLogger(__name__)
 settings = get_settings()
 
-# ── Menu text constants ───────────────────────────────────────────────────────
+# ── Static menu strings ──────────────────────────────────────────────────────
 
 MAIN_MENU = (
     "CON SmartAssist AI\n"
@@ -90,19 +101,19 @@ ACCOUNT_MENU = (
     "0.Main menu"
 )
 
-# Pre-defined topic questions per category (sent to AI with category system prompt)
+# Pre-defined topic questions sent to AI (or knowledge cache) per category
 _TOPICS: dict[str, dict[str, str]] = {
     "business": {
-        "1": "Give one practical tip for pricing products to make profit at a small market stall in Africa.",
-        "2": "Give one simple bookkeeping tip a small African business owner with no accounting background can use today.",
-        "3": "Give one low-cost marketing idea for a small shop or market stall in Africa.",
-        "4": "Give one tip for attracting new customers to a small business in a local African market.",
+        "1": "Give one practical pricing tip for a small market stall or shop in Africa.",
+        "2": "Give one simple bookkeeping tip for a small African business owner with no accounting background.",
+        "3": "Give one low-cost marketing idea for a small shop or stall in Africa.",
+        "4": "Give one tip for attracting and keeping customers at a small business in Africa.",
     },
     "farming": {
-        "1": "Give one practical soil preparation tip for a smallholder farmer in East Africa growing maize or vegetables.",
+        "1": "Give one practical soil preparation tip for a smallholder farmer in East Africa.",
         "2": "Give one effective pest control tip for a smallholder farmer in Africa with limited chemicals.",
-        "3": "Recommend the best crop for a small African farmer to grow now for both food and income.",
-        "4": "Give one tip to help an African smallholder farmer get a fair price for their harvest at the market.",
+        "3": "What is the best crop for a small African farmer to grow now for food and income?",
+        "4": "Give one tip to help an African smallholder farmer get a fair price at the market.",
     },
     "health": {
         "1": "Give one practical nutrition tip for a family in rural Africa on a low income.",
@@ -112,9 +123,9 @@ _TOPICS: dict[str, dict[str, str]] = {
     },
     "education": {
         "1": "Give one highly effective study technique for a secondary school student in Africa.",
-        "2": "Give one practical career planning tip for a student in Africa choosing their future path.",
+        "2": "Give one practical career planning tip for a student in Africa choosing their future.",
         "3": "Give one tip to help a student improve at mathematics.",
-        "4": "Give one practical tip to improve English communication skills for a student in Africa.",
+        "4": "Give one practical tip to improve English communication for a student in Africa.",
     },
 }
 
@@ -128,29 +139,32 @@ async def process_ussd(
     db: AsyncSession,
 ) -> str:
     """
-    Parse the accumulated USSD text and return the appropriate CON/END response.
+    Parse accumulated USSD text and return the appropriate CON / END string.
+    Called once per user keypress.
     """
-    # Ensure user record exists
-    await _ensure_user(phone_number, db)
+    # Ensure user record exists (idempotent; skipped if cached)
+    await _ensure_user_cached(phone_number, db)
 
     # Parse inputs
-    clean_text = (text or "").strip()
-    inputs = [p.strip() for p in clean_text.split("*")] if clean_text else []
+    clean = (text or "").strip()
+    inputs = [p.strip() for p in clean.split("*")] if clean else []
 
     if not inputs:
         return MAIN_MENU
 
     level1 = inputs[0]
-    sub = inputs[1:]  # remaining inputs after the first choice
+    sub = inputs[1:]
 
-    if level1 == "1":
-        return await _handle_category("business", BUSINESS_MENU, sub, session_id, phone_number, db)
-    elif level1 == "2":
-        return await _handle_category("farming", FARMING_MENU, sub, session_id, phone_number, db)
-    elif level1 == "3":
-        return await _handle_category("health", HEALTH_MENU, sub, session_id, phone_number, db)
-    elif level1 == "4":
-        return await _handle_category("education", EDUCATION_MENU, sub, session_id, phone_number, db)
+    route = {
+        "1": ("business", BUSINESS_MENU),
+        "2": ("farming",  FARMING_MENU),
+        "3": ("health",   HEALTH_MENU),
+        "4": ("education", EDUCATION_MENU),
+    }
+
+    if level1 in route:
+        cat, menu = route[level1]
+        return await _handle_category(cat, menu, sub, session_id, phone_number, db)
     elif level1 == "5":
         return await _handle_ask_ai(sub, session_id, phone_number, db)
     elif level1 == "6":
@@ -161,7 +175,7 @@ async def process_ussd(
         return "END Invalid option. Please dial again."
 
 
-# ── Category handler (Business / Farming / Health / Education) ────────────────
+# ── Category handler ──────────────────────────────────────────────────────────
 
 async def _handle_category(
     category: str,
@@ -179,20 +193,20 @@ async def _handle_category(
     if choice == "0":
         return MAIN_MENU
 
-    # Option 5 — free-form question
+    # Option 5 — free-form question in this category
     if choice == "5":
         if len(sub) == 1:
-            return f"CON Your {category} question:"
-        question = "*".join(sub[1:])  # restore any * the user may have typed
+            label = category.capitalize()
+            return f"CON Your {label} question:"
+        question = "*".join(sub[1:])  # restore any * the user typed
         return await _ask_and_respond(question, category, session_id, phone_number, db)
 
     # Options 1-4 — pre-defined topic
     topic_map = _TOPICS.get(category, {})
     if choice in topic_map:
-        question = topic_map[choice]
-        return await _ask_and_respond(question, category, session_id, phone_number, db)
+        return await _ask_and_respond(topic_map[choice], category, session_id, phone_number, db)
 
-    return f"END Invalid option."
+    return "END Invalid option."
 
 
 # ── Ask AI direct (option 5 from main menu) ───────────────────────────────────
@@ -211,7 +225,11 @@ async def _handle_ask_ai(
 
 # ── Account menu ──────────────────────────────────────────────────────────────
 
-async def _handle_account(sub: list[str], phone_number: str, db: AsyncSession) -> str:
+async def _handle_account(
+    sub: list[str],
+    phone_number: str,
+    db: AsyncSession,
+) -> str:
     if not sub:
         return ACCOUNT_MENU
 
@@ -220,33 +238,33 @@ async def _handle_account(sub: list[str], phone_number: str, db: AsyncSession) -
     if choice == "0":
         return MAIN_MENU
 
-    elif choice == "1":
-        # Show stats
+    elif choice == "1":                       # ── My stats ──
         user = await _get_user(phone_number, db)
-        name_str = f"Name: {user.name}\n" if user.name else ""
-        prof_str = f"Role: {user.profession}\n" if user.profession else ""
+        name_line  = f"Name: {user.name}\n" if user.name else ""
+        prof_line  = f"Role: {user.profession}\n" if user.profession else ""
+        since = user.created_at.strftime("%b %Y") if user.created_at else "recently"
         return (
             f"END My Account\n"
-            f"{name_str}"
-            f"{prof_str}"
+            f"{name_line}"
+            f"{prof_line}"
             f"Queries: {user.total_queries}\n"
-            f"Member since: {user.created_at.strftime('%b %Y')}"
+            f"Member since: {since}"
         )
 
-    elif choice == "2":
-        # Set name
+    elif choice == "2":                       # ── Set name ──
         if len(sub) == 1:
             return "CON Enter your name:"
-        name = " ".join(sub[1:])[:100]
+        name = " ".join(sub[1:])[:100].strip()
+        if not name:
+            return "END Name cannot be empty. Dial again."
         await _update_user(phone_number, {"name": name}, db)
         await session_service.clear_profile_cache(phone_number)
         return f"END Name saved: {name}\nDial again to continue."
 
-    elif choice == "3":
-        # Set profession
+    elif choice == "3":                       # ── Set profession ──
         if len(sub) == 1:
             return (
-                "CON Select profession:\n"
+                "CON Select your role:\n"
                 "1.Farmer\n"
                 "2.Student\n"
                 "3.Business owner\n"
@@ -255,10 +273,14 @@ async def _handle_account(sub: list[str], phone_number: str, db: AsyncSession) -
         prof_map = {"1": "farmer", "2": "student", "3": "business owner", "4": "other"}
         profession = prof_map.get(sub[1])
         if not profession:
-            return "END Invalid option."
+            return "END Invalid choice."
         await _update_user(phone_number, {"profession": profession}, db)
         await session_service.clear_profile_cache(phone_number)
-        return f"END Profession saved: {profession}\nAI will now personalise tips for you."
+        return (
+            f"END Role saved: {profession}\n"
+            "AI will now personalise tips for you.\n"
+            "Dial again to continue."
+        )
 
     return "END Invalid option."
 
@@ -272,38 +294,50 @@ async def _ask_and_respond(
     phone_number: str,
     db: AsyncSession,
 ) -> str:
-    """Call AI, format response, log to DB. Returns CON/END string."""
-    if not question.strip():
+    """Call AI (or knowledge cache), format response, fire-and-forget log."""
+    question = question.strip()
+    if not question:
         return "END Please enter a question."
 
+    # ── Rate limit check ────────────────────────────────────────────────────
+    allowed, remaining = await session_service.check_rate_limit(phone_number)
+    if not allowed:
+        return "END You have reached the hourly limit. Please try again later."
+
+    # ── Get user profession for personalisation ──────────────────────────────
+    profession = await _get_cached_profession(phone_number, db)
+
+    # ── Call AI service ──────────────────────────────────────────────────────
     try:
-        result = await ai_service.get_ai_response(question, category, phone_number)
-        ai_text = result.text
-        tokens = result.tokens_used
+        result = await ai_service.get_ai_response(
+            question=question,
+            category=category,
+            phone_number=phone_number,
+            user_profession=profession,
+        )
+        ai_text    = result.text
+        tokens     = result.tokens_used
         from_cache = result.from_cache
 
     except Exception as exc:
-        log.error("AI service error for %s: %s", phone_number, exc)
-        return "END Sorry, AI is busy. Please try again in a moment."
+        log.error("AI error for %s: %s", phone_number, exc)
+        return "END AI is busy. Please try again in a moment."
 
-    # ── Decide whether to offer SMS ──────────────────────────────────────────
-    sms_offered = len(ai_text) > settings.sms_char_limit
+    # ── Decide USSD vs SMS ───────────────────────────────────────────────────
     sms_sent = False
 
-    if sms_offered:
-        # Auto-send full answer via SMS and show short version on USSD
+    if len(ai_text) > settings.sms_char_limit:
         full_sms = sms_service.format_sms_response(category, question, ai_text)
         sms_sent = await sms_service.send_sms(phone_number, full_sms)
-        # Truncate for USSD display
-        display_text = ai_text[: settings.sms_char_limit - 3] + "..."
-        sms_note = "\n\nFull answer sent via SMS." if sms_sent else ""
-        response_str = f"END {display_text}{sms_note}"
+        display  = ai_text[: settings.sms_char_limit - 3] + "..."
+        note     = "\n\nFull answer sent via SMS." if sms_sent else ""
+        response_str = f"END {display}{note}"
     else:
         response_str = f"END {ai_text}"
 
-    # ── Log interaction to DB (fire-and-forget, don't block USSD response) ──
+    # ── Log to DB in background (own session — safe after response is sent) ──
     asyncio.create_task(
-        _log_interaction(
+        _log_interaction_bg(
             session_id=session_id,
             phone_number=phone_number,
             category=category,
@@ -312,7 +346,6 @@ async def _ask_and_respond(
             tokens_used=tokens,
             from_cache=from_cache,
             sms_sent=sms_sent,
-            db=db,
         )
     )
 
@@ -321,11 +354,15 @@ async def _ask_and_respond(
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
-async def _ensure_user(phone_number: str, db: AsyncSession) -> None:
+async def _ensure_user_cached(phone_number: str, db: AsyncSession) -> None:
+    """Create user record if it doesn't exist; skip if Redis says it already does."""
+    if await session_service.user_exists_cached(phone_number):
+        return
     result = await db.execute(select(User).where(User.phone_number == phone_number))
     if result.scalar_one_or_none() is None:
         db.add(User(phone_number=phone_number))
         await db.commit()
+    await session_service.mark_user_exists(phone_number)
 
 
 async def _get_user(phone_number: str, db: AsyncSession) -> User:
@@ -346,7 +383,22 @@ async def _update_user(phone_number: str, fields: dict, db: AsyncSession) -> Non
     await db.commit()
 
 
-async def _log_interaction(
+async def _get_cached_profession(phone_number: str, db: AsyncSession) -> str | None:
+    """Return user's profession from Redis cache, then DB."""
+    profile = await session_service.get_cached_profile(phone_number)
+    if profile and "profession" in profile:
+        return profile["profession"]
+    user = await _get_user(phone_number, db)
+    if user.profession:
+        await session_service.cache_profile(
+            phone_number,
+            {"profession": user.profession, "name": user.name, "language": user.language},
+        )
+    return user.profession
+
+
+async def _log_interaction_bg(
+    *,
     session_id: str,
     phone_number: str,
     category: str,
@@ -355,26 +407,30 @@ async def _log_interaction(
     tokens_used: int,
     from_cache: bool,
     sms_sent: bool,
-    db: AsyncSession,
 ) -> None:
+    """
+    Background task — creates its OWN DB session so it runs safely after the
+    HTTP response has been sent and the request session has been closed.
+    """
     try:
-        interaction = Interaction(
-            session_id=session_id,
-            phone_number=phone_number,
-            category=category,
-            question=question,
-            response=response,
-            tokens_used=tokens_used,
-            from_cache=from_cache,
-            sms_sent=sms_sent,
-        )
-        db.add(interaction)
-        # Increment user query counter
-        await db.execute(
-            update(User)
-            .where(User.phone_number == phone_number)
-            .values(total_queries=User.total_queries + 1)
-        )
-        await db.commit()
+        async with AsyncSessionLocal() as db:
+            db.add(
+                Interaction(
+                    session_id=session_id,
+                    phone_number=phone_number,
+                    category=category,
+                    question=question,
+                    response=response,
+                    tokens_used=tokens_used,
+                    from_cache=from_cache,
+                    sms_sent=sms_sent,
+                )
+            )
+            await db.execute(
+                update(User)
+                .where(User.phone_number == phone_number)
+                .values(total_queries=User.total_queries + 1)
+            )
+            await db.commit()
     except Exception as exc:
-        log.error("Failed to log interaction: %s", exc)
+        log.error("Failed to log interaction for %s: %s", phone_number, exc)

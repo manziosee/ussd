@@ -13,3 +13,6 @@ build/
 .idea/
 .vscode/
 alembic/versions/*.py
+
+# Claude Code local settings (never push these)
+.claude/

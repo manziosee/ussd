@@ -1,10 +1,16 @@
 """
-Redis-backed USSD session manager.
+Redis-backed session, profile, AI-cache, rate-limit, and user-existence services.
 
-A USSD session lives for SESSION_TTL seconds (default 5 min).
-We also cache lightweight user profiles (language, name, profession) for 1 hour
-so we don't hammer the DB on every request.
+Key namespaces
+──────────────
+  ussd:session:{session_id}           USSD session data          TTL = SESSION_TTL (5 min)
+  ussd:profile:{phone_number}         Cached user profile        TTL = 1 hour
+  ussd:ai:{category}:{question_hash}  Cached AI response         TTL = AI_CACHE_TTL (24 h)
+  ussd:rate:{phone_number}:{hour}     Request counter            TTL = 1 hour (auto-expire)
+  ussd:exists:{phone_number}          User-row-exists flag       TTL = 24 hours
 """
+from __future__ import annotations
+
 import json
 import logging
 from datetime import datetime, timezone
@@ -17,7 +23,10 @@ from ..config import get_settings
 log = logging.getLogger(__name__)
 settings = get_settings()
 
-# Module-level Redis pool — initialised in app lifespan
+# Max AI queries a single phone number may make per hour
+RATE_LIMIT_PER_HOUR = 50
+
+# Module-level Redis pool — initialised once at app startup
 _redis: aioredis.Redis | None = None
 
 
@@ -35,34 +44,30 @@ async def init_redis() -> None:
         decode_responses=True,
     )
     await _redis.ping()
-    log.info("Redis connected.")
+    log.info("Redis connected at %s", settings.redis_url)
 
 
 async def close_redis() -> None:
+    global _redis
     if _redis:
         await _redis.aclose()
+        _redis = None
         log.info("Redis connection closed.")
 
 
-# ── Session helpers ──────────────────────────────────────────────────────────
+# ── USSD Session ─────────────────────────────────────────────────────────────
 
 def _session_key(session_id: str) -> str:
     return f"ussd:session:{session_id}"
 
 
-def _profile_key(phone_number: str) -> str:
-    return f"ussd:profile:{phone_number}"
-
-
 async def get_session(session_id: str, phone_number: str) -> dict[str, Any]:
-    """Return session dict, creating a fresh one if it doesn't exist."""
+    """Return existing session or create a fresh one."""
     r = get_redis()
     raw = await r.get(_session_key(session_id))
     if raw:
         return json.loads(raw)
-
-    # New session — seed defaults
-    session = {
+    session: dict[str, Any] = {
         "session_id": session_id,
         "phone_number": phone_number,
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -77,13 +82,11 @@ async def _save_session(session_id: str, data: dict) -> None:
     await r.setex(_session_key(session_id), settings.session_ttl, json.dumps(data))
 
 
-async def increment_session_queries(session_id: str, phone_number: str) -> None:
-    session = await get_session(session_id, phone_number)
-    session["query_count"] = session.get("query_count", 0) + 1
-    await _save_session(session_id, session)
-
-
 # ── User profile cache ────────────────────────────────────────────────────────
+
+def _profile_key(phone: str) -> str:
+    return f"ussd:profile:{phone}"
+
 
 async def get_cached_profile(phone_number: str) -> dict[str, Any] | None:
     r = get_redis()
@@ -93,7 +96,6 @@ async def get_cached_profile(phone_number: str) -> dict[str, Any] | None:
 
 async def cache_profile(phone_number: str, profile: dict) -> None:
     r = get_redis()
-    # Cache for 1 hour; DB is source of truth
     await r.setex(_profile_key(phone_number), 3600, json.dumps(profile))
 
 
@@ -104,17 +106,56 @@ async def clear_profile_cache(phone_number: str) -> None:
 
 # ── AI response cache ─────────────────────────────────────────────────────────
 
-def _ai_cache_key(category: str, question: str) -> str:
-    # Normalise question for better cache hits
+def _ai_key(category: str, question: str) -> str:
     normalised = question.lower().strip()[:120]
     return f"ussd:ai:{category}:{normalised}"
 
 
 async def get_cached_ai_response(category: str, question: str) -> str | None:
     r = get_redis()
-    return await r.get(_ai_cache_key(category, question))
+    return await r.get(_ai_key(category, question))
 
 
 async def cache_ai_response(category: str, question: str, response: str) -> None:
     r = get_redis()
-    await r.setex(_ai_cache_key(category, question), settings.ai_cache_ttl, response)
+    await r.setex(_ai_key(category, question), settings.ai_cache_ttl, response)
+
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+
+def _rate_key(phone: str) -> str:
+    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    return f"ussd:rate:{phone}:{hour}"
+
+
+async def check_rate_limit(phone_number: str) -> tuple[bool, int]:
+    """
+    Increment the per-phone hourly counter.
+    Returns (allowed: bool, remaining: int).
+    """
+    r = get_redis()
+    key = _rate_key(phone_number)
+    count = await r.incr(key)
+    if count == 1:
+        await r.expire(key, 3600)  # auto-expire at end of hour
+    remaining = max(0, RATE_LIMIT_PER_HOUR - count)
+    allowed = count <= RATE_LIMIT_PER_HOUR
+    if not allowed:
+        log.warning("Rate limit exceeded for %s (%d this hour)", phone_number, count)
+    return allowed, remaining
+
+
+# ── User-exists flag (avoids a DB SELECT on every USSD request) ───────────────
+
+def _exists_key(phone: str) -> str:
+    return f"ussd:exists:{phone}"
+
+
+async def user_exists_cached(phone_number: str) -> bool:
+    r = get_redis()
+    return await r.exists(_exists_key(phone_number)) == 1
+
+
+async def mark_user_exists(phone_number: str) -> None:
+    r = get_redis()
+    await r.setex(_exists_key(phone_number), 86400, "1")
