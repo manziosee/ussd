@@ -12,7 +12,8 @@ build/
 *.log
 .idea/
 .vscode/
-alembic/versions/*.py
+# Keep migration files tracked in git — only ignore __pycache__ inside versions
+alembic/versions/__pycache__/
 
 # Claude Code local settings (never push these)
 .claude/

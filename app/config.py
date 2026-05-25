@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     at_api_key: str = ""
     at_shortcode: str = "SMARTASSIST"
     at_environment: str = "sandbox"   # "sandbox" | "production"
+    # Secret token appended to the USSD callback URL → /ussd?token=<value>
+    # AT is configured to POST to that URL; requests missing this token are rejected.
+    at_webhook_token: str = ""
+
+    # ── Admin API ─────────────────────────────────────────────────────────────
+    # Sent as  X-Admin-Key: <value>  header on every /admin/* request.
+    admin_api_key: str = ""
 
     # ── SMS ───────────────────────────────────────────────────────────────────
     sms_enabled: bool = True
