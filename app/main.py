@@ -16,7 +16,6 @@ Shutdown
 from __future__ import annotations
 
 import logging
-import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -40,26 +39,22 @@ settings = get_settings()
 
 
 def _validate_env() -> None:
-    """Fail fast with a clear message if required secrets are missing."""
-    errors: list[str] = []
+    """Warn about missing secrets; only hard-fail on keys needed at startup."""
+    warnings: list[str] = []
 
     if not settings.anthropic_api_key:
-        errors.append("  • ANTHROPIC_API_KEY is not set")
-    if not settings.at_api_key:
-        errors.append("  • AT_API_KEY (Africa's Talking) is not set")
+        warnings.append("  • ANTHROPIC_API_KEY not set — AI responses will fail (menu navigation still works)")
+    if not settings.at_api_key or settings.at_api_key == "your_api_key":
+        warnings.append("  • AT_API_KEY not set — SMS sending disabled")
     if settings.secret_key == "change-this-in-production" and not settings.debug:
-        errors.append("  • SECRET_KEY must be changed for production")
+        warnings.append("  • SECRET_KEY should be changed for production")
 
-    if errors:
+    if warnings:
         log.warning(
-            "⚠  Missing or default configuration values:\n%s\n"
-            "   Copy .env.example → .env and fill in the values.",
-            "\n".join(errors),
+            "⚠  Configuration notice:\n%s\n"
+            "   Update your .env file to enable all features.",
+            "\n".join(warnings),
         )
-        # Only hard-fail on the AI key — SMS is optional; other keys degrade gracefully
-        if not settings.anthropic_api_key:
-            log.error("ANTHROPIC_API_KEY is required. Aborting.")
-            sys.exit(1)
 
 
 @asynccontextmanager

@@ -10,130 +10,117 @@ AI by simply dialling a shortcode like `*123#`.
 
 ## Technology Stack
 
-| Layer | Technology | Purpose |
+| | Technology | Role |
 |---|---|---|
-| ![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white) **Python 3.12** | Core language | |
-| ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white) **FastAPI** | Async API framework | USSD webhook + Admin API |
-| ![Anthropic](https://img.shields.io/badge/Claude-AI-D4A017?logo=anthropic&logoColor=white) **Claude Haiku** | LLM (Anthropic) | AI responses — cheapest + fastest |
-| ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white) **PostgreSQL 16** | Relational DB | Users, interaction history |
-| ![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white) **Redis 7** | In-memory cache | Sessions, AI cache, rate limits |
-| ![Africa's Talking](https://img.shields.io/badge/Africa's%20Talking-00A859?logoColor=white) **Africa's Talking** | Telecom API | USSD gateway + SMS delivery |
-| ![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white) **Docker Compose** | Container orchestration | DB + Redis |
-| ![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-D71F00?logo=sqlalchemy&logoColor=white) **SQLAlchemy 2.0** | ORM (async) | Database layer |
-| ![Alembic](https://img.shields.io/badge/Alembic-grey) **Alembic** | DB migrations | Schema versioning |
-| ![pytest](https://img.shields.io/badge/pytest-0A9EDC?logo=pytest&logoColor=white) **pytest-asyncio** | Test framework | Async test suite |
+| ![Python](https://img.shields.io/badge/Python_3.12-3776AB?style=flat&logo=python&logoColor=white) | **Python 3.12** | Core language |
+| ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat&logo=fastapi&logoColor=white) | **FastAPI** | Async API framework |
+| ![Anthropic](https://img.shields.io/badge/Claude_Haiku-D4A017?style=flat&logoColor=white) | **Claude Haiku** | AI responses (Anthropic) |
+| ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=flat&logo=postgresql&logoColor=white) | **PostgreSQL (Neon)** | Cloud-hosted serverless DB |
+| ![Redis](https://img.shields.io/badge/Redis-DC382D?style=flat&logo=redis&logoColor=white) | **Redis / fakeredis** | Sessions, AI cache, rate limits |
+| ![Africa's Talking](https://img.shields.io/badge/Africa's_Talking-00A859?style=flat&logoColor=white) | **Africa's Talking** | USSD gateway + SMS delivery |
+| ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white) | **Docker Compose** | Optional local DB + Redis |
+| ![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy_2.0-D71F00?style=flat&logoColor=white) | **SQLAlchemy 2.0** | Async ORM |
+| ![Alembic](https://img.shields.io/badge/Alembic-grey?style=flat) | **Alembic** | Database migrations |
+| ![pytest](https://img.shields.io/badge/pytest-0A9EDC?style=flat&logo=pytest&logoColor=white) | **pytest-asyncio** | Async test suite |
 
 ---
 
 ## What the System Does
 
+Any mobile phone dials `*123#`. No internet. No smartphone. No app download.
+The user navigates a simple text menu powered by Claude AI.
+
 ```
 Any mobile phone dials *123#
           │
-          │  (no internet required — works on feature phones)
+          │  No internet required — works on any feature phone
           ▼
 ┌─────────────────────────────────┐
 │    Africa's Talking Gateway     │
-│    (USSD network operator)      │
+│      (USSD network layer)       │
 └────────────────┬────────────────┘
-                 │  POST /ussd
-                 │  form-encoded payload:
-                 │  sessionId, phoneNumber, text
+                 │  POST /ussd  (form-encoded)
+                 │  sessionId · phoneNumber · text
                  ▼
 ┌────────────────────────────────────────────────────────────────┐
-│                     FastAPI Backend                            │
+│                      FastAPI Backend                           │
 │                                                                │
 │  ┌──────────────────────────────────────────────────────────┐ │
-│  │              USSD State Machine                          │ │
-│  │  Parses accumulated text (e.g. "1*2" = Business→Tip 2)  │ │
-│  │  Routes to correct handler based on menu depth           │ │
+│  │                  USSD State Machine                      │ │
+│  │  Parses accumulated text  e.g. "1*2" = Business → Tip 2 │ │
+│  │  Routes to correct handler based on input depth          │ │
 │  └────────────────────────┬─────────────────────────────────┘ │
-│           ┌───────────────┼───────────────┐                   │
-│           ▼               ▼               ▼                   │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐          │
-│  │    Redis     │ │    Claude    │ │  PostgreSQL  │          │
-│  │              │ │    Haiku     │ │              │          │
-│  │ • Sessions   │ │              │ │ • Users      │          │
-│  │ • AI cache   │ │ • Business   │ │ • Interaction│          │
-│  │ • Rate limit │ │ • Farming    │ │   history    │          │
-│  │ • User flag  │ │ • Health     │ │ • Analytics  │          │
-│  │ • Knowledge  │ │ • Education  │ │              │          │
-│  │   seed cache │ │ • General    │ │              │          │
-│  └──────────────┘ └──────────────┘ └──────────────┘          │
-└────────────────────────────┬───────────────────────────────────┘
-                             │  CON <text>  (continue)
-                             │  END <text>  (end session)
-                             ▼
-                    ┌────────────────┐
-                    │ Africa's       │
-                    │ Talking        │──→ SMS fallback (long answers)
-                    │ (delivers to   │
-                    │  user's phone) │
-                    └────────────────┘
-                             │
-                             ▼
-                      User's Phone
-                    ┌────────────────┐
-                    │ SmartAssist AI │
-                    │ 1.Business     │
-                    │ 2.Farming      │
-                    │ 3.Health       │
-                    │ 4.Education    │
-                    │ 5.Ask AI       │
-                    │ 6.Account      │
-                    └────────────────┘
+│           ┌───────────────┼────────────────┐                  │
+│           ▼               ▼                ▼                  │
+│  ┌──────────────┐ ┌───────────────┐ ┌───────────────┐        │
+│  │    Redis     │ │ Claude Haiku  │ │  PostgreSQL   │        │
+│  │  (fakeredis  │ │  (Anthropic)  │ │   on Neon     │        │
+│  │   in dev)    │ │               │ │               │        │
+│  │ · Sessions   │ │ · Business    │ │ · Users       │        │
+│  │ · AI cache   │ │ · Farming     │ │ · Interaction │        │
+│  │ · Rate limit │ │ · Health      │ │   history     │        │
+│  │ · Knowledge  │ │ · Education   │ │ · Analytics   │        │
+│  │   seed cache │ │ · General     │ │               │        │
+│  └──────────────┘ └───────────────┘ └───────────────┘        │
+└───────────────────────────┬────────────────────────────────────┘
+                            │  "CON …" (continue) / "END …" (end)
+                            ▼
+                   Africa's Talking
+                   delivers to phone ──→ SMS fallback (long answers)
+                            │
+                            ▼
+                     User's Phone
+                  ┌─────────────────┐
+                  │ SmartAssist AI  │
+                  │ 1.Business      │
+                  │ 2.Farming       │
+                  │ 3.Health        │
+                  │ 4.Education     │
+                  │ 5.Ask AI        │
+                  │ 6.Account       │
+                  └─────────────────┘
 ```
 
 ---
 
-## Request Flow (detailed)
+## Request Flow
 
 ```
- User Input                 System                         External
- ──────────                 ──────                         ────────
+ User Input              System                          External
+ ──────────              ──────                          ────────
 
  Dials *123#
-        │
-        │──── POST /ussd ──────────────▶ FastAPI
-                                              │
-                                              ├─ Check Redis: user exists?
-                                              │    (avoids DB hit every request)
-                                              │
-                                              ├─ Parse "text" input
-                                              │    ""     → main menu
-                                              │    "1"    → business menu
-                                              │    "1*2"  → business bookkeeping
-                                              │    "1*5*Q"→ free AI question
-                                              │
-                                              ├─ Rate limit check
-                                              │    Redis INCR ussd:rate:{phone}:{hour}
-                                              │    Max 50 req/hour per phone
-                                              │
-                         ┌────────────────────┤
-                         │  Pre-defined topic │
-                         │  OR free question  │
-                         └────────────────────┤
-                                              │
-                                              ├─ Check Redis AI cache
-                                              │    Hit  → return cached (0 tokens)
-                                              │    Miss → call Claude Haiku
-                                              │              ↓
-                                              │         Anthropic API
-                                              │         (system prompt cached)
-                                              │              ↓
-                                              │         Response stored in Redis
-                                              │         (AI_CACHE_TTL = 24 h)
-                                              │
-                                              ├─ Response > 155 chars?
-                                              │    Yes → send full answer via SMS
-                                              │          show truncated on USSD
-                                              │    No  → show full on USSD
-                                              │
-                                              ├─ Log interaction to PostgreSQL
-                                              │    (background task, own session)
-                                              │
- CON / END text ◀──────── Plain text ─────────┘
- displayed on phone
+      │
+      │── POST /ussd ──────────────▶ FastAPI
+                                         │
+                                         ├─ user_exists in Redis?
+                                         │    Yes → skip DB lookup
+                                         │    No  → INSERT user row
+                                         │
+                                         ├─ Rate limit check
+                                         │    Redis INCR per phone/hour
+                                         │    Blocked at 50 req/hr
+                                         │
+                                         ├─ Parse "text" input
+                                         │    ""      → main menu (CON)
+                                         │    "1"     → business menu (CON)
+                                         │    "1*2"   → bookkeeping tip
+                                         │    "1*5*Q" → free AI question
+                                         │
+                                         ├─ Check Redis AI cache
+                                         │    HIT  → return cached (free)
+                                         │    MISS → Claude Haiku API
+                                         │            system prompt cached
+                                         │            response saved to Redis
+                                         │
+                                         ├─ Response > 155 chars?
+                                         │    Yes → SMS via Africa's Talking
+                                         │          show truncated on USSD
+                                         │
+                                         └─ Log to PostgreSQL (background)
+
+ CON / END ◀──────────── Plain text ─────┘
+ shown on phone
 ```
 
 ---
@@ -144,69 +131,62 @@ Any mobile phone dials *123#
 *123#
 └── SmartAssist AI
     ├── 1. Business
-    │   ├── 1. Pricing tips          ──▶ AI: How to price products in Africa
-    │   ├── 2. Bookkeeping           ──▶ AI: Simple bookkeeping for small business
-    │   ├── 3. Marketing             ──▶ AI: Low-cost marketing ideas
-    │   ├── 4. Get customers         ──▶ AI: Attract and retain customers
-    │   ├── 5. My question           ──▶ CON: "Your business question:" → AI answer
+    │   ├── 1. Pricing tips      →  AI (knowledge cache first)
+    │   ├── 2. Bookkeeping       →  AI (knowledge cache first)
+    │   ├── 3. Marketing         →  AI (knowledge cache first)
+    │   ├── 4. Get customers     →  AI (knowledge cache first)
+    │   ├── 5. My question       →  CON: "Your question:" → AI answer
     │   └── 0. Main menu
     │
-    ├── 2. Farming
-    │   ├── 1. Soil tips             ──▶ AI (or knowledge cache)
-    │   ├── 2. Pest control          ──▶ AI (or knowledge cache)
-    │   ├── 3. Best crops            ──▶ AI (or knowledge cache)
-    │   ├── 4. Market prices         ──▶ AI (or knowledge cache)
-    │   ├── 5. My question           ──▶ CON: free question → AI answer
-    │   └── 0. Main menu
-    │
-    ├── 3. Health (same pattern — nutrition, hygiene, maternal, child)
-    ├── 4. Education (same pattern — study, career, maths, English)
+    ├── 2. Farming   (Soil · Pest control · Best crops · Market prices · My question)
+    ├── 3. Health    (Nutrition · Hygiene · Maternal health · Child health · My question)
+    ├── 4. Education (Study tips · Career guide · Math help · English tips · My question)
     │
     ├── 5. Ask AI
-    │   └── CON: "Ask AI anything:" → free question → AI answer (general)
+    │   └── CON: "Ask AI anything:" → free question → AI answer
     │
     └── 6. Account
-        ├── 1. My stats              ──▶ END: total queries, name, role, member since
-        ├── 2. Set my name           ──▶ CON: "Enter your name:" → saves to DB
-        ├── 3. Set profession        ──▶ CON: Farmer / Student / Business / Other
+        ├── 1. My stats       →  query count · name · role · member since
+        ├── 2. Set my name    →  CON: "Enter your name:" → saved to DB
+        ├── 3. Set profession →  Farmer / Student / Business / Other
         └── 0. Main menu
 ```
 
 ---
 
-## Feature Overview
+## Features
 
-### ✅ Phase 1 — MVP (built)
+### ✅ Phase 1 — MVP (complete)
 
 | Feature | Detail |
 |---|---|
-| USSD menu navigation | 5 categories + account, unlimited depth |
-| AI responses | Claude Haiku — Africa-focused, < 155 chars |
-| Prompt caching | Anthropic caches system prompts → ~90% token savings |
-| Response caching | Redis caches AI answers for 24 h → zero API cost on repeat |
-| Offline knowledge seed | 16 pre-written responses seeded at startup → zero first-call latency |
-| SMS fallback | Long answers auto-delivered via SMS + truncated on USSD |
-| User profiles | Name + profession stored; profession personalises AI prompts |
-| Rate limiting | 50 queries/phone/hour via Redis counter |
-| Session management | Redis-backed, 5-min TTL (USSD standard timeout) |
-| Interaction logging | Every AI query logged to PostgreSQL for analytics |
-| Admin API | Stats, user list, interaction history with pagination |
-| CLI simulator | Test full USSD sessions locally without Africa's Talking |
-| Docker Compose | PostgreSQL + Redis launched with one command |
-| Alembic migrations | Schema versioning for production DB management |
-| Test suite | 20+ async tests covering all menu paths and edge cases |
+| **USSD menu navigation** | 5 categories + account, unlimited depth via state machine |
+| **AI responses** | Claude Haiku — Africa-focused, under 155 chars |
+| **Anthropic prompt caching** | System prompts cached server-side → ~90% token savings |
+| **Redis response cache** | Same answer cached 24 h → zero API cost on repeat questions |
+| **Offline knowledge seed** | 16 pre-written responses loaded at startup → zero latency & zero cost for all pre-defined topics |
+| **SMS fallback** | Long answers auto-sent via Africa's Talking SMS |
+| **User profiles** | Name + profession stored; AI personalises tips based on profession |
+| **Rate limiting** | 50 queries / phone / hour via Redis counter |
+| **Session management** | Redis-backed, 5-min TTL (USSD standard) |
+| **fakeredis fallback** | Server runs without Redis in dev (auto-detected, in-memory) |
+| **Neon PostgreSQL** | Serverless cloud DB, SSL auto-configured |
+| **Interaction logging** | Every query logged to PostgreSQL for analytics |
+| **Admin API** | Stats, user list, interaction history |
+| **CLI simulator** | Full USSD session testing locally — no Africa's Talking needed |
+| **Alembic migrations** | Async-compatible schema versioning |
+| **Test suite** | 23 async tests, fully mocked (no external services required) |
 
 ### 🔜 Phase 2 — Planned
 
 | Feature | Detail |
 |---|---|
-| Kinyarwanda | Full menu + AI responses in Kinyarwanda |
+| Kinyarwanda support | Full menus + AI responses in Kinyarwanda |
 | Swahili + French | Additional language options |
 | Admin dashboard | React/Next.js analytics panel |
 | Daily tip broadcast | Scheduled SMS to opted-in users |
 | Voice / IVR | Speech-to-text over phone calls |
-| Market data | Live crop prices from agricultural APIs |
-| Expanded knowledge | 100+ pre-seeded answers, zero AI cost for FAQs |
+| Market prices | Live crop prices from agricultural APIs |
 
 ---
 
@@ -215,48 +195,42 @@ Any mobile phone dials *123#
 ### 1. Clone and configure
 
 ```bash
-git clone <your-repo>
+git clone https://github.com/manziosee/ussd.git
 cd ussd
 cp .env.example .env
 ```
 
-Edit `.env` and fill in your keys:
+Edit `.env`:
 
 ```env
-ANTHROPIC_API_KEY=sk-ant-...       # get from console.anthropic.com
-AT_USERNAME=your_at_username       # Africa's Talking username
-AT_API_KEY=your_at_api_key         # Africa's Talking API key
-AT_SHORTCODE=SMARTASSIST           # your registered shortcode
-AT_ENVIRONMENT=sandbox             # "sandbox" or "production"
+# AI (required for free-form questions)
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Africa's Talking
+AT_USERNAME=sandbox
+AT_API_KEY=your_sandbox_key
+AT_SHORTCODE=12345
+AT_ENVIRONMENT=sandbox
+
+# Database — Neon (recommended) or local PostgreSQL
+DATABASE_URL=postgresql+asyncpg://user:pass@host/dbname
 ```
 
-### 2. Start infrastructure
+### 2. Install and run
 
 ```bash
-docker compose up db redis -d
-```
-
-Or run the full stack including the app:
-
-```bash
-docker compose up --build
-```
-
-### 3. Install dependencies and run
-
-```bash
-python -m venv venv
-venv\Scripts\activate          # Windows
-# source venv/bin/activate     # Linux / macOS
-
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
-Server is live at **http://localhost:8000**
-Swagger docs at **http://localhost:8000/docs**
+> **No Redis? No problem.** The server auto-detects when Redis is unavailable
+> and falls back to an in-memory `fakeredis` store — perfect for development.
 
-### 4. Test with the CLI simulator
+> **Database options:**
+> - **Neon** (recommended) — free serverless PostgreSQL at [neon.tech](https://neon.tech). SSL is configured automatically.
+> - **Docker** — run `docker compose up db redis -d` for local PostgreSQL + Redis.
+
+### 3. Test with the CLI simulator
 
 ```bash
 python simulator/cli_sim.py
@@ -281,11 +255,13 @@ python simulator/cli_sim.py
   Your input: _
 ```
 
-### 5. Run tests
+### 4. Run tests
 
 ```bash
 pytest
 ```
+
+All 23 tests pass with no external services required (Redis, DB, and AI are all mocked).
 
 ---
 
@@ -295,8 +271,8 @@ pytest
 
 1. Sign up at [africastalking.com](https://africastalking.com)
 2. Go to **Sandbox → USSD → Create channel** (e.g. `*384*72275#`)
-3. Set callback URL: `https://your-server.com/ussd`
-4. Use AT's built-in simulator to send test dials
+3. Set the callback URL to your server: `https://your-server.com/ussd`
+4. Test using AT's built-in simulator
 
 ### Expose localhost with ngrok
 
@@ -305,62 +281,72 @@ ngrok http 8000
 # Paste the HTTPS URL into your AT USSD channel callback
 ```
 
-### Production
+### Go to production
 
 ```env
 AT_ENVIRONMENT=production
 AT_USERNAME=your_live_username
 AT_API_KEY=your_live_key
-AT_SHORTCODE=your_registered_shortcode
 ```
 
 ---
 
 ## API Reference
 
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `POST` | `/ussd` | Africa's Talking | USSD webhook (form-encoded) |
-| `POST` | `/simulate` | None | Local simulator (JSON) |
-| `GET`  | `/admin/stats` | None* | Aggregated analytics |
-| `GET`  | `/admin/users` | None* | User list (paginated) |
-| `GET`  | `/admin/interactions` | None* | Interaction log (paginated) |
-| `GET`  | `/health` | None | Health check |
-| `GET`  | `/docs` | None | Swagger UI |
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/ussd` | Africa's Talking USSD webhook (form-encoded) |
+| `POST` | `/simulate` | Local simulator — JSON body |
+| `GET` | `/admin/stats` | Aggregated analytics |
+| `GET` | `/admin/users` | User list (paginated) |
+| `GET` | `/admin/interactions` | Interaction history (paginated, filterable by category) |
+| `GET` | `/health` | Health check |
+| `GET` | `/docs` | Swagger UI |
 
-> *Add Bearer token middleware before deploying to production.
-
-### `POST /simulate` — example
+### Example — `/simulate`
 
 ```bash
 curl -X POST http://localhost:8000/simulate \
   -H "Content-Type: application/json" \
-  -d '{"phone_number": "+250788000001", "text": "1*1", "session_id": "abc123"}'
+  -d '{"phone_number": "+250788000001", "text": "2*3", "session_id": "s1"}'
 ```
 
-Response:
 ```
-END Add your cost + 30% profit minimum. Test price on 5 customers. If all buy instantly, raise price 10%. Track weekly.
+END Plant beans alongside maize — beans add nitrogen to soil and sell
+year-round. Kale and spinach grow in 30 days and have steady local demand.
 ```
 
-### `GET /admin/stats` — example
+### Example — `/admin/stats`
 
 ```json
 {
-  "total_users": 142,
-  "total_interactions": 1893,
-  "total_tokens_used": 47250,
-  "cache_hit_rate": 0.74,
-  "sms_sent": 38,
+  "total_users": 1,
+  "total_interactions": 4,
+  "total_tokens_used": 0,
+  "cache_hit_rate": 1.0,
+  "sms_sent": 0,
   "interactions_by_category": {
-    "business": 612,
-    "farming": 504,
-    "health": 311,
-    "education": 287,
-    "general": 179
+    "business": 1,
+    "farming": 1,
+    "health": 1,
+    "education": 1
   }
 }
 ```
+
+> `total_tokens_used: 0` and `cache_hit_rate: 1.0` — all responses served from
+> the offline knowledge seed cache. Zero AI API cost.
+
+---
+
+## Cost Model
+
+| Scenario | API Cost |
+|---|---|
+| Pre-defined topic (1–4 in any category) | **$0** — knowledge seed cache |
+| Same free question asked again within 24 h | **$0** — Redis response cache |
+| New free-form question | **< $0.0005** — Claude Haiku + prompt cache |
+| **Blended average** | **< $0.0001 per interaction** |
 
 ---
 
@@ -369,76 +355,73 @@ END Add your cost + 30% profit minimum. Test price on 5 customers. If all buy in
 ```
 ussd/
 ├── app/
-│   ├── main.py                 # FastAPI app, lifespan, startup validation
-│   ├── config.py               # All settings via pydantic-settings + .env
-│   ├── database.py             # Async SQLAlchemy engine + session factory
-│   │
+│   ├── main.py                  # FastAPI app, lifespan, startup validation
+│   ├── config.py                # All settings via pydantic-settings + .env
+│   ├── database.py              # Async SQLAlchemy, Neon SSL auto-config
 │   ├── models/
-│   │   ├── user.py             # User profile (phone, name, profession, language)
-│   │   └── interaction.py      # AI query log (category, question, response, tokens)
-│   │
+│   │   ├── user.py              # User profile (phone, name, profession, language)
+│   │   └── interaction.py       # AI query log (tokens, cache hit, SMS sent)
 │   ├── services/
-│   │   ├── menu_service.py     # ★ USSD state machine — core routing logic
-│   │   ├── ai_service.py       # Claude Haiku integration with prompt caching
-│   │   ├── session_service.py  # Redis: sessions, AI cache, rate limit, user flag
-│   │   ├── knowledge_service.py# 16 pre-seeded offline responses (zero API cost)
-│   │   └── sms_service.py      # Africa's Talking SMS for long responses
-│   │
+│   │   ├── menu_service.py      # ★ USSD state machine — core routing logic
+│   │   ├── ai_service.py        # Claude Haiku + Anthropic prompt caching
+│   │   ├── session_service.py   # Redis: sessions · AI cache · rate limit · fakeredis fallback
+│   │   ├── knowledge_service.py # 16 pre-seeded offline responses (zero API cost)
+│   │   └── sms_service.py       # Africa's Talking SMS for long responses
 │   ├── routes/
-│   │   ├── ussd.py             # POST /ussd (AT webhook) + POST /simulate
-│   │   └── admin.py            # GET /admin/stats|users|interactions
-│   │
+│   │   ├── ussd.py              # POST /ussd + POST /simulate
+│   │   └── admin.py             # GET /admin/stats|users|interactions
 │   └── schemas/
-│       └── ussd.py             # Pydantic request/response models
-│
+│       └── ussd.py              # Pydantic schemas
 ├── simulator/
-│   └── cli_sim.py              # Terminal USSD simulator (no AT needed)
-│
+│   └── cli_sim.py               # Terminal USSD simulator (no AT account needed)
 ├── tests/
-│   ├── conftest.py             # Fixtures: mock Redis, DB, AI
-│   └── test_ussd_menu.py       # 20+ async tests — all menu paths
-│
+│   ├── conftest.py              # Fixtures: mock Redis, DB, AI
+│   └── test_ussd_menu.py        # 23 async tests — all menu paths + edge cases
 ├── alembic/
-│   └── env.py                  # Async-compatible Alembic environment
-│
-├── docker-compose.yml          # PostgreSQL 16 + Redis 7
-├── Dockerfile                  # Production container
-├── requirements.txt            # All Python dependencies
-├── alembic.ini                 # Alembic config
-├── pytest.ini                  # Test config
-└── .env.example                # All required environment variables
+│   └── env.py                   # Async-compatible Alembic environment
+├── docker-compose.yml           # PostgreSQL 16 + Redis 7 (optional, for local dev)
+├── Dockerfile                   # Production container
+├── requirements.txt
+├── alembic.ini
+├── pytest.ini
+└── .env.example
 ```
 
 ---
 
-## Cost Model
+## Live Test Results
 
-With all caching layers active:
+Tested against **Neon PostgreSQL** + **fakeredis** (no Docker required):
 
-| Scenario | Cost |
-|---|---|
-| Pre-defined topic, first user | **$0** (knowledge seed cache) |
-| Pre-defined topic, 2nd+ user | **$0** (Redis 24 h cache) |
-| Free question, first time asked | **< $0.0005** (Claude Haiku + prompt cache) |
-| Free question, asked again within 24 h | **$0** (Redis cache) |
-| Expected blended cost | **< $0.0001 per interaction** |
+| Test case | Input | Response |
+|---|---|---|
+| Fresh dial | `""` | `CON SmartAssist AI…` |
+| Business menu | `"1"` | `CON Business Advisor…` |
+| Pricing tip | `"1*1"` | `END Add total cost + 30% profit…` |
+| Farming — best crops | `"2*3"` | `END Plant beans alongside maize…` |
+| Health — hygiene | `"3*2"` | `END Wash hands with soap…` |
+| Education — study | `"4*1"` | `END Study 25 min, rest 5 min…` |
+| Set profession: farmer | `"6*3*1"` | `END Role saved: farmer…` |
+| Ask AI prompt | `"5"` | `CON Ask AI anything:…` |
+| Free question prompt | `"1*5"` | `CON Your Business question:` |
+
+All pre-defined tips served from **knowledge cache — 0 tokens used, $0 cost**.
 
 ---
 
 ## Contributing
 
 1. Fork the repo
-2. Create a feature branch: `git checkout -b feature/kinyarwanda-support`
-3. Make changes and add tests
-4. Run `pytest` — all tests must pass
-5. Open a PR describing what you built
+2. Create a feature branch: `git checkout -b feature/kinyarwanda`
+3. Add changes + tests — `pytest` must pass
+4. Open a PR
 
 ---
 
 ## License
 
-MIT License — free to use, modify, and deploy.
+MIT — free to use, modify, and deploy.
 
 ---
 
-*Built with ❤️ for African communities — making AI accessible to everyone, everywhere.*
+*Built for African communities — making AI accessible to everyone, everywhere.*

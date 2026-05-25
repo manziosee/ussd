@@ -37,14 +37,37 @@ def get_redis() -> aioredis.Redis:
 
 
 async def init_redis() -> None:
+    """
+    Connect to Redis. If the server is unreachable (e.g. Docker not running),
+    fall back to an in-memory fakeredis instance so the app still works in dev.
+    """
     global _redis
-    _redis = aioredis.from_url(
-        settings.redis_url,
-        encoding="utf-8",
-        decode_responses=True,
-    )
-    await _redis.ping()
-    log.info("Redis connected at %s", settings.redis_url)
+    try:
+        client = aioredis.from_url(
+            settings.redis_url,
+            encoding="utf-8",
+            decode_responses=True,
+            socket_connect_timeout=2,
+        )
+        await client.ping()
+        _redis = client
+        log.info("Redis connected at %s", settings.redis_url)
+    except Exception as exc:
+        log.warning(
+            "Redis unavailable (%s) — falling back to in-memory fakeredis. "
+            "Sessions and cache will reset on restart.",
+            exc,
+        )
+        try:
+            import fakeredis.aioredis as fakeredis_aio
+            _redis = fakeredis_aio.FakeRedis(decode_responses=True)
+            await _redis.ping()
+            log.info("fakeredis in-memory store initialised (dev mode).")
+        except ImportError:
+            raise RuntimeError(
+                "Redis is not running and 'fakeredis' is not installed. "
+                "Either start Redis or run: pip install fakeredis"
+            )
 
 
 async def close_redis() -> None:
