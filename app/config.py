@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     # Sent as  X-Admin-Key: <value>  header on every /admin/* request.
     admin_api_key: str = ""
 
+    # ── Cron ──────────────────────────────────────────────────────────────────
+    # Secret token for  POST /cron/daily-tips?secret=<value>
+    # Call this endpoint daily (e.g. Railway / GitHub Actions cron) to broadcast
+    # morning tips to all opted-in subscribers.
+    # Leave empty to disable the endpoint.
+    cron_secret: str = ""
+
     # ── SMS ───────────────────────────────────────────────────────────────────
     sms_enabled: bool = True
     sms_char_limit: int = 155  # show truncated + SMS offer if AI reply > this

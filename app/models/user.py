@@ -20,11 +20,18 @@ class User(Base):
 
     # Preferences
     sms_opt_out = Column(
-        Boolean,
-        default=False,
-        nullable=False,
-        server_default="false",
+        Boolean, default=False, nullable=False, server_default="false",
         comment="When True, skip sending full-answer SMS even if response exceeds char limit",
+    )
+
+    # Daily tip subscription
+    daily_tips_enabled = Column(
+        Boolean, default=False, nullable=False, server_default="false",
+        comment="User opted in to receive one tip per day via SMS",
+    )
+    daily_tip_category = Column(
+        String(50), nullable=True,
+        comment="Preferred tip category (business/farming/health/education). NULL = use profession",
     )
 
     # Stats

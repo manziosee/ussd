@@ -78,11 +78,14 @@ async def test_business_back_to_main(mock_db):
 
 @pytest.mark.asyncio
 async def test_business_predefined_topic(mock_db, mock_ai):
-    """Pre-defined topic 1 (pricing) should call AI and end session."""
+    """Pre-defined topic 1 (pricing) returns CON with More/Detail/Back options."""
     r = await ussd("1*1", mock_db)
-    assert is_end(r)
+    assert is_con(r), f"Expected CON, got: {r[:80]}"
     mock_ai.assert_awaited_once()
     assert "Test AI response" in r
+    assert "1.More tips" in r
+    assert "2.More detail" in r
+    assert "0.Back" in r
 
 
 @pytest.mark.asyncio
@@ -117,9 +120,10 @@ async def test_farming_submenu_shown(mock_db):
 @pytest.mark.asyncio
 async def test_farming_predefined_topic(mock_db, mock_ai):
     r = await ussd("2*3", mock_db)  # Best crops
-    assert is_end(r)
+    assert is_con(r), f"Expected CON, got: {r[:80]}"
     mock_ai.assert_awaited_once()
     assert call_category(mock_ai) == "farming"
+    assert "1.More tips" in r
 
 
 # ── Health submenu ────────────────────────────────────────────────────────────
@@ -184,6 +188,10 @@ async def test_account_stats(mock_db):
     user_mock = MagicMock()
     user_mock.name = "Alice"
     user_mock.profession = "farmer"
+    user_mock.language = "en"
+    user_mock.sms_opt_out = False
+    user_mock.daily_tips_enabled = False
+    user_mock.daily_tip_category = None
     user_mock.total_queries = 7
     user_mock.created_at = datetime(2024, 1, 15, tzinfo=timezone.utc)
 

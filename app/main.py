@@ -28,6 +28,7 @@ from .services.session_service import init_redis, close_redis
 from .services.knowledge_service import seed_knowledge_cache
 from .routes.ussd import router as ussd_router
 from .routes.admin import router as admin_router
+from .routes.cron import router as cron_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -100,6 +101,7 @@ app.add_middleware(
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(ussd_router)
 app.include_router(admin_router)
+app.include_router(cron_router)
 
 
 # ── Root & health ─────────────────────────────────────────────────────────────

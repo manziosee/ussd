@@ -11,6 +11,7 @@ Key namespaces
   ussd:dedup:{session_id}:{text_hash}     Dedup cache for AT retries  TTL = 30 s
   ussd:resume:{phone_number}              Last CON position for resume TTL = 10 min
   ussd:resume_offered:{session_id}        Flag: resume prompt shown    TTL = SESSION_TTL
+  ussd:lastresponse:{phone}:{category}    Last AI response text        TTL = SESSION_TTL (5 min)
 """
 from __future__ import annotations
 
@@ -267,3 +268,23 @@ async def mark_resume_offered(session_id: str) -> None:
 async def clear_resume_offered(session_id: str) -> None:
     r = get_redis()
     await r.delete(_resume_offered_key(session_id))
+
+
+# ── Last AI response cache (for "Tell me more" / "More detail" follow-up) ─────
+# Stores the most recent AI response text per (phone, category) so the follow-up
+# call can pass it as context without re-fetching from DB or the full AI cache.
+
+def _last_response_key(phone: str, category: str) -> str:
+    return f"ussd:lastresponse:{phone}:{category}"
+
+
+async def set_last_ai_response(phone_number: str, category: str, response: str) -> None:
+    """Save the last AI response for this user + category (5-min TTL = session lifetime)."""
+    r = get_redis()
+    await r.setex(_last_response_key(phone_number, category), 300, response)
+
+
+async def get_last_ai_response(phone_number: str, category: str) -> str | None:
+    """Return the most recent AI response for this user + category, or None."""
+    r = get_redis()
+    return await r.get(_last_response_key(phone_number, category))

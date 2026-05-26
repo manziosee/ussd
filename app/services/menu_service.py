@@ -11,46 +11,35 @@ We return:
 Menu tree
 ─────────
   Main Menu
-  ├─ 1. Business    →  4 pre-defined tips + free question
-  ├─ 2. Farming     →  4 pre-defined tips + free question
-  ├─ 3. Health      →  4 pre-defined tips + free question
-  ├─ 4. Education   →  4 pre-defined tips + free question
+  ├─ 1. Business    →  4 tips · My question · Calculator
+  ├─ 2. Farming     →  4 tips · My question · Nearby offices
+  ├─ 3. Health      →  4 tips · My question · Nearby clinics
+  ├─ 4. Education   →  4 tips · My question · Nearby schools
   ├─ 5. Ask AI      →  free-form question
-  └─ 6. Account     →  stats · name · profession · language · SMS settings
+  └─ 6. Account     →  stats · name · profession · language · SMS · Daily tips
+
+After each predefined tip (CON response):
+  1.More tips    →  variation tip (different angle on same topic)
+  2.More detail  →  elaboration tip (builds on what was just shown)
+  0.Back         →  main menu
 
 Input sanitisation
 ──────────────────
-Raw AT text goes through _sanitize() before any routing:
-  • Trailing # stripped (AT sometimes appends it)
-  • Double-* collapses into a single separator (e.g. "1**2" → ["1","2"])
-  • Leading/trailing whitespace removed from every segment
-  • Total text capped at 200 chars — rejects abusive inputs
-
-"More tips" CON flow (predefined topics 1-4 per category)
-──────────────────────────────────────────────────────────
-After the first tip, the response is CON (not END), offering:
-  1.More tips  → AI generates a fresh variation tip
-  0.Main menu  → back to root
-
-Text accumulates: "1*2" → first tip, "1*2*1" → variation,
-"1*2*1*1" → another variation, "1*2*0" → main menu.
-_handle_category detects post_actions = sub[1:] to route accordingly.
+_sanitize(): strips '#', collapses '**', trims whitespace, rejects >200 chars.
 
 Session resume after drop
 ─────────────────────────
-On every CON response the current text (menu position) is saved to Redis
-under ussd:resume:{phone} with a 10-minute TTL.
-When a user re-dials after a drop (text="", new sessionId, resume exists)
-they see:
-  "CON Resume where you left off? 1.Yes - <label>  2.New session"
-Pressing 1 re-processes the saved text; pressing 2 clears it and shows
-the normal main menu.
+Position saved on every CON → offered on fresh dial if within 10-min TTL.
+
+Multilingual error messages
+───────────────────────────
+_t(key, language) returns English or Kinyarwanda error string.
+Language is fetched from profile cache once per request and threaded through.
 
 Bug notes
 ─────────
-_log_interaction_bg() creates its OWN DB session (AsyncSessionLocal) so it
-is safe to fire-and-forget via asyncio.create_task; it no longer shares the
-request-scoped session that closes when the HTTP response is sent.
+_log_interaction_bg() creates its OWN DB session (AsyncSessionLocal) — safe
+for fire-and-forget via asyncio.create_task.
 """
 from __future__ import annotations
 
@@ -69,12 +58,63 @@ from ..services import ai_service, session_service, sms_service
 log = logging.getLogger(__name__)
 settings = get_settings()
 
-# ── AT USSD response body limit ───────────────────────────────────────────────
-_MAX_USSD_BODY = 182               # safe AT limit (chars total, incl. CON/END prefix)
-_MORE_OPTIONS  = "\n1.More tips\n0.Main menu"   # 22 chars — appended to tip CON responses
-
-# ── Max raw text length — guards against excessively long / malformed inputs ──
+# ── AT USSD body limit & navigation suffix ────────────────────────────────────
+_MAX_USSD_BODY = 182
+# 3 post-tip options: "1.More tips\n2.More detail\n0.Back" = 34 chars overhead
+_MORE_OPTIONS  = "\n1.More tips\n2.More detail\n0.Back"
 _MAX_INPUT_LEN = 200
+
+# ── Multilingual error strings ─────────────────────────────────────────────────
+
+_STRINGS: dict[str, dict[str, str]] = {
+    "invalid_option": {
+        "en": "Invalid option. Please try again.",
+        "rw": "Amahitamo mabi. Ongera ugerageze.",
+    },
+    "invalid_choice": {
+        "en": "Invalid choice.",
+        "rw": "Ihitamo mabi.",
+    },
+    "invalid_number": {
+        "en": "Please enter a valid number (digits only).",
+        "rw": "Injiza umubare ukuri (imibare gusa).",
+    },
+    "too_long": {
+        "en": "Input too long. Please dial again.",
+        "rw": "Injiza ndende cyane. Vugisha inomero.",
+    },
+    "no_question": {
+        "en": "Please enter a question.",
+        "rw": "Injiza ikibazo cyawe.",
+    },
+    "ai_busy": {
+        "en": "AI is busy. Please try again in a moment.",
+        "rw": "AI iraruhutse. Ongera ugerageze.",
+    },
+    "rate_limit": {
+        "en": "Hourly limit reached. Please try again later.",
+        "rw": "Wageze ku mupaka w'isaha. Ongera ugerageze nyuma.",
+    },
+    "name_empty": {
+        "en": "Name cannot be empty. Dial again.",
+        "rw": "Izina ntirishobora kuba ubusa. Vugisha inomero.",
+    },
+    "no_services": {
+        "en": "No services listed for this area yet.",
+        "rw": "Nta serivisi zianditswe muri uwo murenge.",
+    },
+    "system_error": {
+        "en": "System error. Please try again.",
+        "rw": "Ikibazo cya sisitemu. Ongera ugerageze.",
+    },
+}
+
+
+def _t(key: str, lang: str = "en") -> str:
+    """Return the localised string for key in lang (falls back to English)."""
+    bucket = _STRINGS.get(key, {})
+    return bucket.get(lang) or bucket.get("en") or key
+
 
 # ── Static menu strings ───────────────────────────────────────────────────────
 
@@ -95,6 +135,7 @@ BUSINESS_MENU = (
     "3.Marketing\n"
     "4.Get customers\n"
     "5.My question\n"
+    "6.Calculator\n"
     "0.Main menu"
 )
 
@@ -105,6 +146,7 @@ FARMING_MENU = (
     "3.Best crops\n"
     "4.Market prices\n"
     "5.My question\n"
+    "6.Nearby offices\n"
     "0.Main menu"
 )
 
@@ -115,6 +157,7 @@ HEALTH_MENU = (
     "3.Maternal health\n"
     "4.Child health\n"
     "5.My question\n"
+    "6.Nearby clinics\n"
     "0.Main menu"
 )
 
@@ -125,6 +168,7 @@ EDUCATION_MENU = (
     "3.Math help\n"
     "4.English tips\n"
     "5.My question\n"
+    "6.Nearby schools\n"
     "0.Main menu"
 )
 
@@ -135,10 +179,28 @@ ACCOUNT_MENU = (
     "3.Set profession\n"
     "4.Language\n"
     "5.SMS alerts\n"
+    "6.Daily tips\n"
     "0.Main menu"
 )
 
-# Pre-defined topic questions sent to AI (or knowledge cache) per category
+CALCULATOR_MENU = (
+    "CON Calculator\n"
+    "1.Profit check\n"
+    "2.Loan payment\n"
+    "0.Back"
+)
+
+DISTRICT_MENU = (
+    "CON Select your district:\n"
+    "1.Kigali\n"
+    "2.Musanze\n"
+    "3.Huye\n"
+    "4.Rubavu\n"
+    "5.Kayonza\n"
+    "0.Back"
+)
+
+# Pre-defined topic questions sent to AI per category
 _TOPICS: dict[str, dict[str, str]] = {
     "business": {
         "1": "Give one practical pricing tip for a small market stall or shop in Africa.",
@@ -176,15 +238,14 @@ _ROUTE_TO_CAT: dict[str, str] = {
     "1": "business", "2": "farming", "3": "health", "4": "education",
 }
 _TOPIC_SHORT: dict[str, dict[str, str]] = {
-    "business":  {"1": "Pricing",    "2": "Bookkeeping", "3": "Marketing",  "4": "Customers"},
-    "farming":   {"1": "Soil tips",  "2": "Pest ctrl",   "3": "Best crops", "4": "Prices"},
-    "health":    {"1": "Nutrition",  "2": "Hygiene",     "3": "Maternal",   "4": "Child hlth"},
-    "education": {"1": "Study tips", "2": "Career",      "3": "Math",       "4": "English"},
+    "business":  {"1": "Pricing",    "2": "Bookkeeping", "3": "Marketing",  "4": "Customers",  "6": "Calculator"},
+    "farming":   {"1": "Soil tips",  "2": "Pest ctrl",   "3": "Best crops", "4": "Prices",     "6": "Offices"},
+    "health":    {"1": "Nutrition",  "2": "Hygiene",     "3": "Maternal",   "4": "Child hlth", "6": "Clinics"},
+    "education": {"1": "Study tips", "2": "Career",      "3": "Math",       "4": "English",    "6": "Schools"},
 }
 
 
 def _get_position_label(level1: str, sub: list[str]) -> str:
-    """Human-readable label for the resume prompt, e.g. 'Business: Bookkeeping'."""
     cat_label = _CAT_LABELS.get(level1, "Menu")
     cat_key   = _ROUTE_TO_CAT.get(level1)
     if not sub or not cat_key:
@@ -199,22 +260,15 @@ def _sanitize(text: str) -> tuple[str, list[str]]:
     """
     Clean raw USSD text and split into input segments.
 
-    Returns (clean_text, segments) where:
-      clean_text — normalised string suitable as a Redis resume key
-      segments   — list of non-empty, stripped segment strings
-
     Handles:
-      • Trailing '#' from AT (e.g. "*384*72275#" → stripped by AT, but just in case)
-      • Double-star  "1**2"  → ["1", "2"]  (empty segments discarded)
-      • Whitespace around segments  " 1 * 2 " → ["1", "2"]
-      • Length guard: inputs > 200 chars treated as empty (returns error flag)
+      • Trailing '#'    — strip (AT sometimes appends it)
+      • Double-star '**' — empty segments discarded
+      • Whitespace      — stripped from every segment
+      • Length guard    — inputs > 200 chars rejected ("__TOO_LONG__")
     """
     raw = (text or "").strip().rstrip("#").strip()
-
-    # Length guard — prevent excessively long / abusive inputs
     if len(raw) > _MAX_INPUT_LEN:
         return "__TOO_LONG__", []
-
     segments = [p.strip() for p in raw.split("*") if p.strip()]
     return raw, segments
 
@@ -227,18 +281,19 @@ async def process_ussd(
     text: str,
     db: AsyncSession,
 ) -> str:
-    """
-    Parse accumulated USSD text and return the appropriate CON / END string.
-    Called once per user keypress.
-    """
+    """Parse accumulated USSD text and return the appropriate CON / END string."""
     await _ensure_user_cached(phone_number, db)
 
-    # 1. Sanitise input
+    # Fetch user prefs once — used for language, profession, sms_opt_out
+    prefs    = await _get_cached_user_prefs(phone_number, db)
+    language = prefs.get("language", "en") or "en"
+
+    # Sanitise
     clean, inputs = _sanitize(text)
     if clean == "__TOO_LONG__":
-        return "END Input too long. Please dial again."
+        return f"END {_t('too_long', language)}"
 
-    # 2. Handle fresh dial (text is empty / no segments)
+    # ── Fresh dial ────────────────────────────────────────────────────────────
     if not inputs:
         resume = await session_service.get_resume_position(phone_number)
         if resume:
@@ -256,21 +311,19 @@ async def process_ussd(
     level1 = inputs[0]
     sub    = inputs[1:]
 
-    # 3. Handle resume decision — the user responded to the "Resume?" prompt
+    # ── Resume decision ───────────────────────────────────────────────────────
     if await session_service.was_resume_offered(session_id):
         await session_service.clear_resume_offered(session_id)
         if level1 == "1":
             resume = await session_service.get_resume_position(phone_number)
             await session_service.clear_resume_position(phone_number)
             if resume and resume.get("text"):
-                # Re-process with the saved text; the inner call handles routing
                 return await process_ussd(session_id, phone_number, resume["text"], db)
         else:
-            # "2" = new session, or any unexpected input → clear and show main menu
             await session_service.clear_resume_position(phone_number)
         return MAIN_MENU
 
-    # 4. Normal routing — capture response so we can save position afterwards
+    # ── Normal routing ────────────────────────────────────────────────────────
     route = {
         "1": ("business",  BUSINESS_MENU),
         "2": ("farming",   FARMING_MENU),
@@ -280,19 +333,17 @@ async def process_ussd(
 
     if level1 in route:
         cat, menu = route[level1]
-        response = await _handle_category(cat, menu, sub, session_id, phone_number, db)
+        response = await _handle_category(cat, menu, sub, session_id, phone_number, db, prefs, language)
     elif level1 == "5":
-        response = await _handle_ask_ai(sub, session_id, phone_number, db)
+        response = await _handle_ask_ai(sub, session_id, phone_number, db, language)
     elif level1 == "6":
-        response = await _handle_account(sub, phone_number, db)
+        response = await _handle_account(sub, phone_number, db, language)
     elif level1 == "0":
         response = MAIN_MENU
     else:
-        response = "END Invalid option. Please dial again."
+        response = f"END {_t('invalid_option', language)}"
 
-    # 5. Save / clear resume position
-    #    • CON and not at root → save so user can resume if signal drops
-    #    • END or explicit "0" → clear (session ended or user navigated to root)
+    # ── Save / clear resume position ──────────────────────────────────────────
     if response.startswith("CON") and level1 != "0":
         label = _get_position_label(level1, sub)
         await session_service.set_resume_position(phone_number, clean, label)
@@ -311,18 +362,22 @@ async def _handle_category(
     session_id: str,
     phone_number: str,
     db: AsyncSession,
+    prefs: dict,
+    language: str = "en",
 ) -> str:
     """
-    Route within a category (business / farming / health / education).
+    Route within a category.
 
     sub  = everything after the level-1 digit:
-      []           → show category menu
-      ["2"]        → first view of topic tip      (CON with More/Back)
-      ["2","1"]    → "More tips" after first tip  (CON with More/Back)
-      ["2","1","1"]→ another variation            (CON with More/Back)
-      ["2","0"]    → back to main menu
-      ["5"]        → prompt for free-form question
-      ["5","q"]    → submit free-form question
+      []             → show category menu
+      ["2"]          → first tip (CON with More/Detail/Back)
+      ["2","1"]      → "More tips" variation
+      ["2","2"]      → "More detail" elaboration (uses Redis last-response context)
+      ["2","1","2"]  → "More detail" after a variation
+      ["2","0"]      → main menu
+      ["5"]          → prompt for free question
+      ["5","q"]      → free question
+      ["6"]          → calculator (business) OR services directory (others)
     """
     if not sub:
         return menu_text
@@ -332,29 +387,36 @@ async def _handle_category(
     if choice == "0":
         return MAIN_MENU
 
-    # ── Free-form question in this category ───────────────────────────────────
+    # ── Option 5: free question ───────────────────────────────────────────────
     if choice == "5":
         if len(sub) == 1:
             label = category.capitalize()
             return f"CON Your {label} question:"
         question = "*".join(sub[1:])
-        return await _ask_and_respond(question, category, session_id, phone_number, db)
+        return await _ask_and_respond(question, category, session_id, phone_number, db, prefs)
 
-    # ── Pre-defined topics 1–4 ────────────────────────────────────────────────
+    # ── Option 6: calculator (business) OR services directory ─────────────────
+    if choice == "6":
+        if category == "business":
+            return await _handle_calculator(sub[1:], language)
+        return await _handle_services(sub[1:], category, language)
+
+    # ── Options 1–4: predefined topics ───────────────────────────────────────
     topic_map = _TOPICS.get(category, {})
     if choice not in topic_map:
-        return "END Invalid option."
+        return f"END {_t('invalid_option', language)}"
 
-    # post_actions: inputs received after the first tip was shown
-    #   sub=["2"]         → []       first view of topic
-    #   sub=["2","1"]     → ["1"]    first "More tips"
-    #   sub=["2","1","1"] → ["1","1"]  second "More tips"
-    #   sub=["2","0"]     → ["0"]    back to main
+    # post_actions = inputs after the first topic digit
+    #   sub=["2"]           → []         first view
+    #   sub=["2","1"]       → ["1"]      "More tips"
+    #   sub=["2","2"]       → ["2"]      "More detail"
+    #   sub=["2","1","2"]   → ["1","2"]  "More detail" after variation
+    #   sub=["2","0"]       → ["0"]      back to main
     post_actions = sub[1:]
 
     if not post_actions:
         return await _ask_and_respond(
-            topic_map[choice], category, session_id, phone_number, db, show_more=True
+            topic_map[choice], category, session_id, phone_number, db, prefs, show_more=True
         )
 
     last_action = post_actions[-1]
@@ -363,26 +425,221 @@ async def _handle_category(
         return MAIN_MENU
 
     if last_action == "1":
+        # "More tips" — variation on the same topic
         variation_q = topic_map[choice] + " Give a completely different, fresh practical tip."
         return await _ask_and_respond(
-            variation_q, category, session_id, phone_number, db, show_more=True
+            variation_q, category, session_id, phone_number, db, prefs, show_more=True
         )
 
-    return "END Invalid option."
+    if last_action == "2":
+        # "More detail" — elaborate on the last response shown for this category
+        prev = await session_service.get_last_ai_response(phone_number, category)
+        if prev:
+            elaboration_q = (
+                f"Building on this tip: {prev[:120]}\n\n"
+                "Give ONE specific, additional action step that the user can take today."
+            )
+        else:
+            elaboration_q = (
+                topic_map[choice]
+                + " Give one specific, follow-up action step with more practical detail."
+            )
+        return await _ask_and_respond(
+            elaboration_q, category, session_id, phone_number, db, prefs, show_more=True
+        )
+
+    return f"END {_t('invalid_option', language)}"
 
 
-# ── Ask AI direct (option 5 from main menu) ────────────────────────────────────
+# ── Financial calculator (Business menu option 6) ──────────────────────────────
+
+async def _handle_calculator(sub: list[str], language: str = "en") -> str:
+    """
+    Pure-math USSD calculator — zero AI cost, zero network calls.
+
+    sub = everything after the "6" choice in the Business menu:
+      []                 → show calculator menu
+      ["1"]              → profit: enter cost price
+      ["1", cost]        → profit: enter selling price
+      ["1", cost, price] → profit: show result
+      ["2"]              → loan: enter principal
+      ["2", P]           → loan: enter annual interest rate (%)
+      ["2", P, r]        → loan: enter number of months
+      ["2", P, r, n]     → loan: show result
+      ["0"]              → back to Business menu
+    """
+    if not sub:
+        return CALCULATOR_MENU
+
+    mode = sub[0]
+    args = sub[1:]
+
+    if mode == "0":
+        return BUSINESS_MENU
+
+    # ── Profit calculator ─────────────────────────────────────────────────────
+    if mode == "1":
+        if not args:
+            return "CON Enter cost price (RWF):\n(amount you paid)"
+        cost_str = args[0]
+        if not cost_str.lstrip("0").isdigit() or not cost_str.isdigit():
+            return f"END {_t('invalid_number', language)}"
+        cost = int(cost_str)
+
+        if len(args) == 1:
+            return "CON Enter selling price (RWF):\n(amount you charge)"
+        price_str = args[1]
+        if not price_str.isdigit():
+            return f"END {_t('invalid_number', language)}"
+        price = int(price_str)
+
+        profit = price - cost
+        margin = (profit / price * 100) if price > 0 else 0
+        profit_100 = profit * 100
+
+        if price == 0:
+            return f"END {_t('invalid_number', language)}"
+        elif profit <= 0:
+            advice = "Below cost! Raise price."
+        elif margin < 15:
+            advice = "Low margin. Aim for 20%+."
+        elif margin < 30:
+            advice = "Decent margin. Keep tracking."
+        else:
+            advice = "Great margin!"
+
+        return (
+            "END Profit Analysis\n"
+            f"Cost:    {cost:,} RWF\n"
+            f"Price:   {price:,} RWF\n"
+            f"Profit:  {profit:,} RWF/item\n"
+            f"Margin:  {margin:.1f}%\n"
+            f"x100 items: {profit_100:,} RWF\n"
+            f"{advice}"
+        )
+
+    # ── Loan payment calculator ───────────────────────────────────────────────
+    if mode == "2":
+        if not args:
+            return "CON Enter loan amount (RWF):"
+        principal_str = args[0]
+        if not principal_str.isdigit():
+            return f"END {_t('invalid_number', language)}"
+        principal = int(principal_str)
+
+        if len(args) == 1:
+            return "CON Annual interest rate (%):\n(e.g. 18 for 18%/yr)"
+        rate_str = args[1]
+        try:
+            annual_rate = float(rate_str)
+            if annual_rate < 0:
+                raise ValueError
+        except ValueError:
+            return f"END {_t('invalid_number', language)}"
+
+        if len(args) == 2:
+            return "CON Loan duration (months):\n(e.g. 12 = 1 year)"
+        months_str = args[2]
+        if not months_str.isdigit() or int(months_str) <= 0:
+            return f"END {_t('invalid_number', language)}"
+        months = int(months_str)
+
+        # Standard amortisation: P·r·(1+r)^n / ((1+r)^n − 1)
+        monthly_rate = annual_rate / 12 / 100
+        if monthly_rate == 0:
+            monthly = principal / months
+        else:
+            factor  = (1 + monthly_rate) ** months
+            monthly = principal * monthly_rate * factor / (factor - 1)
+
+        total          = monthly * months
+        total_interest = total - principal
+
+        return (
+            "END Loan Calculator\n"
+            f"Loan:    {principal:,} RWF\n"
+            f"Rate:    {annual_rate:.1f}%/yr\n"
+            f"Term:    {months} months\n"
+            f"Monthly: {monthly:,.0f} RWF\n"
+            f"Total:   {total:,.0f} RWF\n"
+            f"Interest:{total_interest:,.0f} RWF"
+        )
+
+    return f"END {_t('invalid_option', language)}"
+
+
+# ── Nearby services directory (Farming / Health / Education option 6) ──────────
+
+async def _handle_services(
+    sub: list[str],
+    service_type: str,   # "farming" | "health" | "education"
+    language: str = "en",
+) -> str:
+    """
+    Show static service listings by district.
+
+    sub = everything after the "6" choice in the category menu:
+      []      → show district selection menu
+      ["1"]   → Kigali services for service_type
+      ["0"]   → back to category menu
+    """
+    from ..data.services import DISTRICTS, DISTRICT_LABELS, SERVICES, SERVICE_LABELS
+
+    # Back-link menus per service type
+    _back: dict[str, str] = {
+        "farming":   FARMING_MENU,
+        "health":    HEALTH_MENU,
+        "education": EDUCATION_MENU,
+    }
+
+    if not sub:
+        return DISTRICT_MENU
+
+    choice = sub[0]
+    if choice == "0":
+        return _back.get(service_type, MAIN_MENU)
+
+    district = DISTRICTS.get(choice)
+    if not district:
+        return f"END {_t('invalid_option', language)}"
+
+    services = SERVICES.get(district, {}).get(service_type, [])
+    if not services:
+        return f"END {_t('no_services', language)}"
+
+    district_label = DISTRICT_LABELS.get(district, district.capitalize())
+    type_label     = SERVICE_LABELS.get(service_type, "Services")
+
+    # Build output (max 3 services, truncated to AT body limit)
+    header = f"END {type_label} - {district_label}"
+    lines  = [header]
+    for svc in services[:3]:
+        entry = f"{svc['name']}\nTel: {svc['tel']}"
+        if svc.get("note"):
+            entry += f"\n{svc['note']}"
+        lines.append(entry)
+
+    output = "\n\n".join(lines)
+    # Hard-truncate to stay within AT body limit
+    if len(output) > _MAX_USSD_BODY:
+        output = output[: _MAX_USSD_BODY - 1] + "…"
+    return output
+
+
+# ── Ask AI (main menu option 5) ────────────────────────────────────────────────
 
 async def _handle_ask_ai(
     sub: list[str],
     session_id: str,
     phone_number: str,
     db: AsyncSession,
+    language: str = "en",
 ) -> str:
     if not sub:
         return "CON Ask AI anything:\n(type your question)"
     question = "*".join(sub)
-    return await _ask_and_respond(question, "general", session_id, phone_number, db)
+    prefs = await _get_cached_user_prefs(phone_number, db)
+    return await _ask_and_respond(question, "general", session_id, phone_number, db, prefs)
 
 
 # ── Account menu ───────────────────────────────────────────────────────────────
@@ -391,16 +648,17 @@ async def _handle_account(
     sub: list[str],
     phone_number: str,
     db: AsyncSession,
+    language: str = "en",
 ) -> str:
     """
-    Account sub-menu.
+    Account sub-menu — 6 options + back.
 
-    Options:
       1 — My stats
       2 — Set name
       3 — Set profession
-      4 — Language  (English / Kinyarwanda)
+      4 — Language
       5 — SMS alerts toggle
+      6 — Daily tips subscription
       0 — Main menu
     """
     if not sub:
@@ -414,17 +672,17 @@ async def _handle_account(
     # ── 1. My stats ──────────────────────────────────────────────────────────
     elif choice == "1":
         user = await _get_user(phone_number, db)
-        name_line = f"Name: {user.name}\n"           if user.name       else ""
-        prof_line = f"Role: {user.profession}\n"      if user.profession else ""
-        lang_line = f"Lang: {'Kinyarwanda' if user.language == 'rw' else 'English'}\n"
-        sms_line  = "SMS: off\n"                      if user.sms_opt_out else ""
-        since     = user.created_at.strftime("%b %Y") if user.created_at  else "recently"
+        name_line  = f"Name: {user.name}\n"            if user.name         else ""
+        prof_line  = f"Role: {user.profession}\n"       if user.profession   else ""
+        lang_name  = "Kinyarwanda" if (user.language or "en") == "rw" else "English"
+        lang_line  = f"Lang: {lang_name}\n"
+        sms_line   = "SMS: off\n"                       if user.sms_opt_out  else ""
+        tips_cat   = user.daily_tip_category or "auto"
+        tips_line  = f"Daily tips: {tips_cat}\n" if user.daily_tips_enabled  else ""
+        since      = user.created_at.strftime("%b %Y") if user.created_at    else "recently"
         return (
             "END My Account\n"
-            f"{name_line}"
-            f"{prof_line}"
-            f"{lang_line}"
-            f"{sms_line}"
+            f"{name_line}{prof_line}{lang_line}{sms_line}{tips_line}"
             f"Queries: {user.total_queries}\n"
             f"Since: {since}"
         )
@@ -435,7 +693,7 @@ async def _handle_account(
             return "CON Enter your name:"
         name = " ".join(sub[1:])[:100].strip()
         if not name:
-            return "END Name cannot be empty. Dial again."
+            return f"END {_t('name_empty', language)}"
         await _update_user(phone_number, {"name": name}, db)
         await session_service.clear_profile_cache(phone_number)
         return f"END Name saved: {name}\nDial again to continue."
@@ -450,10 +708,10 @@ async def _handle_account(
                 "3.Business owner\n"
                 "4.Other"
             )
-        prof_map = {"1": "farmer", "2": "student", "3": "business owner", "4": "other"}
+        prof_map   = {"1": "farmer", "2": "student", "3": "business owner", "4": "other"}
         profession = prof_map.get(sub[1])
         if not profession:
-            return "END Invalid choice."
+            return f"END {_t('invalid_choice', language)}"
         await _update_user(phone_number, {"profession": profession}, db)
         await session_service.clear_profile_cache(phone_number)
         return (
@@ -475,9 +733,9 @@ async def _handle_account(
         if action == "0":
             return ACCOUNT_MENU
         lang_map = {"1": "en", "2": "rw"}
-        lang = lang_map.get(action)
+        lang     = lang_map.get(action)
         if not lang:
-            return "END Invalid choice."
+            return f"END {_t('invalid_choice', language)}"
         await _update_user(phone_number, {"language": lang}, db)
         await session_service.clear_profile_cache(phone_number)
         lang_name = "Kinyarwanda" if lang == "rw" else "English"
@@ -491,8 +749,8 @@ async def _handle_account(
     elif choice == "5":
         user = await _get_user(phone_number, db)
         if len(sub) == 1:
-            status  = "OFF" if user.sms_opt_out else "ON"
-            toggle  = "Turn off SMS" if not user.sms_opt_out else "Turn on SMS"
+            status = "OFF" if user.sms_opt_out else "ON"
+            toggle = "Turn off SMS" if not user.sms_opt_out else "Turn on SMS"
             return (
                 f"CON SMS alerts: {status}\n"
                 f"1.{toggle}\n"
@@ -507,9 +765,71 @@ async def _handle_account(
             await session_service.clear_profile_cache(phone_number)
             status = "disabled" if new_val else "enabled"
             return f"END SMS alerts {status}.\nDial again to continue."
-        return "END Invalid option."
+        return f"END {_t('invalid_option', language)}"
 
-    return "END Invalid option."
+    # ── 6. Daily tips ─────────────────────────────────────────────────────────
+    elif choice == "6":
+        user = await _get_user(phone_number, db)
+
+        if len(sub) == 1:
+            if user.daily_tips_enabled:
+                cat = (user.daily_tip_category or "auto").capitalize()
+                return (
+                    f"CON Daily tips: ON\n"
+                    f"Category: {cat}\n"
+                    "1.Turn off\n"
+                    "2.Change category\n"
+                    "0.Back"
+                )
+            else:
+                return (
+                    "CON Daily tips: OFF\n"
+                    "Get a morning SMS tip daily.\n"
+                    "1.Turn on\n"
+                    "0.Back"
+                )
+
+        action = sub[1]
+
+        if action == "0":
+            return ACCOUNT_MENU
+
+        if action == "1":
+            new_val = not user.daily_tips_enabled
+            await _update_user(phone_number, {"daily_tips_enabled": new_val}, db)
+            await session_service.clear_profile_cache(phone_number)
+            if new_val:
+                return (
+                    "END Daily tips enabled!\n"
+                    "You'll get a morning SMS tip daily.\n"
+                    "Dial again to continue."
+                )
+            return "END Daily tips disabled.\nDial again to continue."
+
+        if action == "2" and user.daily_tips_enabled:
+            if len(sub) == 2:
+                return (
+                    "CON Select tip category:\n"
+                    "1.Business\n"
+                    "2.Farming\n"
+                    "3.Health\n"
+                    "4.Education\n"
+                    "0.Back"
+                )
+            cat_map = {"1": "business", "2": "farming", "3": "health", "4": "education"}
+            new_cat = cat_map.get(sub[2])
+            if not new_cat:
+                return f"END {_t('invalid_choice', language)}"
+            await _update_user(phone_number, {"daily_tip_category": new_cat}, db)
+            await session_service.clear_profile_cache(phone_number)
+            return (
+                f"END Daily tips: {new_cat.capitalize()}\n"
+                "Dial again to continue."
+            )
+
+        return f"END {_t('invalid_option', language)}"
+
+    return f"END {_t('invalid_option', language)}"
 
 
 # ── Core AI call + formatting ──────────────────────────────────────────────────
@@ -520,31 +840,31 @@ async def _ask_and_respond(
     session_id: str,
     phone_number: str,
     db: AsyncSession,
+    prefs: dict,
     show_more: bool = False,
 ) -> str:
     """
-    Call AI (or knowledge cache), format the response, fire-and-forget log.
+    Call AI (or knowledge cache), format response, fire-and-forget log.
 
-    show_more=True  → return CON with "1.More tips / 0.Main menu"
-                       (used for pre-defined topics so users can keep browsing)
-    show_more=False → return END (used for free-form questions)
+    prefs       — dict from _get_cached_user_prefs (profession, language, sms_opt_out)
+    show_more   — True for predefined topics (CON + More/Detail/Back options)
+                  False for free-form questions (END)
     """
     question = question.strip()
     if not question:
-        return "END Please enter a question."
+        language = prefs.get("language", "en")
+        return f"END {_t('no_question', language)}"
+
+    language    = prefs.get("language", "en") or "en"
+    profession  = prefs.get("profession")
+    sms_opt_out = prefs.get("sms_opt_out", False)
 
     # Rate limit
     allowed, _remaining = await session_service.check_rate_limit(phone_number)
     if not allowed:
-        return "END You have reached the hourly limit. Please try again later."
+        return f"END {_t('rate_limit', language)}"
 
-    # User preferences (profession, language, sms_opt_out)
-    prefs       = await _get_cached_user_prefs(phone_number, db)
-    profession  = prefs.get("profession")
-    language    = prefs.get("language", "en") or "en"
-    sms_opt_out = prefs.get("sms_opt_out", False)
-
-    # Call AI service
+    # AI call
     try:
         result = await ai_service.get_ai_response(
             question=question,
@@ -558,20 +878,22 @@ async def _ask_and_respond(
         from_cache = result.from_cache
     except Exception as exc:
         log.error("AI error for %s: %s", phone_number, exc)
-        return "END AI is busy. Please try again in a moment."
+        return f"END {_t('ai_busy', language)}"
 
-    # Format response
+    # Save last response for "More detail" follow-up
+    await session_service.set_last_ai_response(phone_number, category, ai_text)
+
+    # Format
     sms_sent = False
 
     if show_more:
-        # Reserve space: "CON " (4) + options (22) = 26 overhead
+        # CON with navigation — "4 + 34 = 38" chars overhead
         max_tip = _MAX_USSD_BODY - len("CON ") - len(_MORE_OPTIONS)
         if len(ai_text) > max_tip:
             ai_text = ai_text[:max_tip - 1] + "…"
         response_str = f"CON {ai_text}{_MORE_OPTIONS}"
 
     elif not sms_opt_out and len(ai_text) > settings.sms_char_limit:
-        # Long free-form answer → truncate for USSD + send full via SMS
         full_sms = sms_service.format_sms_response(category, question, ai_text)
         sms_sent = await sms_service.send_sms(phone_number, full_sms)
         display  = ai_text[: settings.sms_char_limit - 3] + "..."
@@ -581,7 +903,6 @@ async def _ask_and_respond(
     else:
         response_str = f"END {ai_text}"
 
-    # Log interaction in background (own DB session — safe after HTTP response)
     asyncio.create_task(
         _log_interaction_bg(
             session_id=session_id,
@@ -601,7 +922,6 @@ async def _ask_and_respond(
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 
 async def _ensure_user_cached(phone_number: str, db: AsyncSession) -> None:
-    """Create user record if it doesn't exist; skip if Redis flags it exists."""
     if await session_service.user_exists_cached(phone_number):
         return
     result = await db.execute(select(User).where(User.phone_number == phone_number))
@@ -630,21 +950,19 @@ async def _update_user(phone_number: str, fields: dict, db: AsyncSession) -> Non
 
 
 async def _get_cached_user_prefs(phone_number: str, db: AsyncSession) -> dict:
-    """
-    Return cached user preferences: profession, language, sms_opt_out, name.
-    Checks Redis profile cache first; falls back to DB on miss.
-    Old cache entries missing any of the three required keys are invalidated.
-    """
+    """Return cached user prefs (profession, language, sms_opt_out, name).
+    Invalidates stale cache entries that are missing required keys."""
     profile = await session_service.get_cached_profile(phone_number)
     if profile and {"profession", "language", "sms_opt_out"}.issubset(profile):
         return profile
-
-    user = await _get_user(phone_number, db)
-    prefs: dict = {
-        "name":        user.name,
-        "profession":  user.profession,
-        "language":    user.language or "en",
-        "sms_opt_out": bool(user.sms_opt_out),
+    user  = await _get_user(phone_number, db)
+    prefs = {
+        "name":               user.name,
+        "profession":         user.profession,
+        "language":           user.language or "en",
+        "sms_opt_out":        bool(user.sms_opt_out),
+        "daily_tips_enabled": bool(user.daily_tips_enabled),
+        "daily_tip_category": user.daily_tip_category,
     }
     await session_service.cache_profile(phone_number, prefs)
     return prefs
@@ -661,10 +979,7 @@ async def _log_interaction_bg(
     from_cache: bool,
     sms_sent: bool,
 ) -> None:
-    """
-    Background task — creates its OWN DB session so it runs safely after the
-    HTTP response has been sent and the request session has been closed.
-    """
+    """Background task — own DB session, safe after HTTP response is sent."""
     try:
         async with AsyncSessionLocal() as db:
             db.add(
