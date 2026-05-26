@@ -11,12 +11,22 @@ We return:
 Menu tree
 ─────────
   Main Menu
-  ├─ 1. Business   →  4 pre-defined tips + free question
-  ├─ 2. Farming    →  4 pre-defined tips + free question
-  ├─ 3. Health     →  4 pre-defined tips + free question
-  ├─ 4. Education  →  4 pre-defined tips + free question
-  ├─ 5. Ask AI     →  free-form question
-  └─ 6. Account    →  stats · set name · set profession
+  ├─ 1. Business    →  4 pre-defined tips + free question
+  ├─ 2. Farming     →  4 pre-defined tips + free question
+  ├─ 3. Health      →  4 pre-defined tips + free question
+  ├─ 4. Education   →  4 pre-defined tips + free question
+  ├─ 5. Ask AI      →  free-form question
+  └─ 6. Account     →  stats · name · profession · language · SMS settings
+
+"More tips" flow (predefined topics 1-4 per category)
+──────────────────────────────────────────────────────
+After the first tip, the response is CON (not END), offering:
+  1.More tips  → AI generates a fresh variation tip
+  0.Main menu  → back to root
+
+The AT text accumulates: "1*2" → first tip, "1*2*1" → variation,
+"1*2*1*1" → another variation, "1*2*0" → main menu.
+_handle_category detects post_actions = sub[1:] to route accordingly.
 
 Bug notes
 ─────────
@@ -41,7 +51,11 @@ from ..services import ai_service, session_service, sms_service
 log = logging.getLogger(__name__)
 settings = get_settings()
 
-# ── Static menu strings ──────────────────────────────────────────────────────
+# ── AT USSD response body limit ───────────────────────────────────────────────
+_MAX_USSD_BODY  = 182              # safe AT limit (chars total incl. CON/END prefix)
+_MORE_OPTIONS   = "\n1.More tips\n0.Main menu"   # appended to CON tip responses (22 chars)
+
+# ── Static menu strings ───────────────────────────────────────────────────────
 
 MAIN_MENU = (
     "CON SmartAssist AI\n"
@@ -98,6 +112,8 @@ ACCOUNT_MENU = (
     "1.My stats\n"
     "2.Set my name\n"
     "3.Set profession\n"
+    "4.Language\n"
+    "5.SMS alerts\n"
     "0.Main menu"
 )
 
@@ -130,7 +146,7 @@ _TOPICS: dict[str, dict[str, str]] = {
 }
 
 
-# ── Main entry point ──────────────────────────────────────────────────────────
+# ── Main entry point ───────────────────────────────────────────────────────────
 
 async def process_ussd(
     session_id: str,
@@ -142,23 +158,22 @@ async def process_ussd(
     Parse accumulated USSD text and return the appropriate CON / END string.
     Called once per user keypress.
     """
-    # Ensure user record exists (idempotent; skipped if cached)
+    # Ensure user record exists (idempotent; skipped if Redis flags it exists)
     await _ensure_user_cached(phone_number, db)
 
-    # Parse inputs
-    clean = (text or "").strip()
+    clean  = (text or "").strip()
     inputs = [p.strip() for p in clean.split("*")] if clean else []
 
     if not inputs:
         return MAIN_MENU
 
     level1 = inputs[0]
-    sub = inputs[1:]
+    sub    = inputs[1:]
 
     route = {
-        "1": ("business", BUSINESS_MENU),
-        "2": ("farming",  FARMING_MENU),
-        "3": ("health",   HEALTH_MENU),
+        "1": ("business",  BUSINESS_MENU),
+        "2": ("farming",   FARMING_MENU),
+        "3": ("health",    HEALTH_MENU),
         "4": ("education", EDUCATION_MENU),
     }
 
@@ -175,7 +190,7 @@ async def process_ussd(
         return "END Invalid option. Please dial again."
 
 
-# ── Category handler ──────────────────────────────────────────────────────────
+# ── Category handler ───────────────────────────────────────────────────────────
 
 async def _handle_category(
     category: str,
@@ -185,6 +200,17 @@ async def _handle_category(
     phone_number: str,
     db: AsyncSession,
 ) -> str:
+    """
+    Route within a category (business / farming / health / education).
+
+    sub  = everything after the level-1 digit:
+      []        → show category menu
+      ["2"]     → first view of bookkeeping tip  (returns CON with More/Back)
+      ["2","1"] → "More tips" after bookkeeping  (returns CON with More/Back)
+      ["2","0"] → go back to main menu
+      ["5"]     → prompt for free-form question
+      ["5","q"] → free-form question text
+    """
     if not sub:
         return menu_text
 
@@ -193,23 +219,48 @@ async def _handle_category(
     if choice == "0":
         return MAIN_MENU
 
-    # Option 5 — free-form question in this category
+    # ── Free-form question in this category ───────────────────────────────────
     if choice == "5":
         if len(sub) == 1:
             label = category.capitalize()
             return f"CON Your {label} question:"
-        question = "*".join(sub[1:])  # restore any * the user typed
+        question = "*".join(sub[1:])
         return await _ask_and_respond(question, category, session_id, phone_number, db)
 
-    # Options 1-4 — pre-defined topic
+    # ── Pre-defined topics 1–4 ────────────────────────────────────────────────
     topic_map = _TOPICS.get(category, {})
-    if choice in topic_map:
-        return await _ask_and_respond(topic_map[choice], category, session_id, phone_number, db)
+    if choice not in topic_map:
+        return "END Invalid option."
+
+    # post_actions: inputs after the first topic selection
+    # e.g. sub=["2"]        → []          first view
+    #      sub=["2","1"]    → ["1"]       "More tips" once
+    #      sub=["2","1","1"]→ ["1","1"]   "More tips" twice
+    #      sub=["2","0"]    → ["0"]       back to main
+    post_actions = sub[1:]
+
+    if not post_actions:
+        # First view — show tip with continuation options
+        return await _ask_and_respond(
+            topic_map[choice], category, session_id, phone_number, db, show_more=True
+        )
+
+    last_action = post_actions[-1]
+
+    if last_action == "0":
+        return MAIN_MENU
+
+    if last_action == "1":
+        # User wants a fresh variation on the same topic
+        variation_q = topic_map[choice] + " Give a completely different, fresh practical tip."
+        return await _ask_and_respond(
+            variation_q, category, session_id, phone_number, db, show_more=True
+        )
 
     return "END Invalid option."
 
 
-# ── Ask AI direct (option 5 from main menu) ───────────────────────────────────
+# ── Ask AI direct (option 5 from main menu) ────────────────────────────────────
 
 async def _handle_ask_ai(
     sub: list[str],
@@ -223,13 +274,24 @@ async def _handle_ask_ai(
     return await _ask_and_respond(question, "general", session_id, phone_number, db)
 
 
-# ── Account menu ──────────────────────────────────────────────────────────────
+# ── Account menu ───────────────────────────────────────────────────────────────
 
 async def _handle_account(
     sub: list[str],
     phone_number: str,
     db: AsyncSession,
 ) -> str:
+    """
+    Account sub-menu.
+
+    Options:
+      1 — My stats
+      2 — Set name
+      3 — Set profession
+      4 — Language  (English / Kinyarwanda)
+      5 — SMS alerts toggle
+      0 — Main menu
+    """
     if not sub:
         return ACCOUNT_MENU
 
@@ -238,20 +300,26 @@ async def _handle_account(
     if choice == "0":
         return MAIN_MENU
 
-    elif choice == "1":                       # ── My stats ──
+    # ── 1. My stats ──────────────────────────────────────────────────────────
+    elif choice == "1":
         user = await _get_user(phone_number, db)
-        name_line  = f"Name: {user.name}\n" if user.name else ""
-        prof_line  = f"Role: {user.profession}\n" if user.profession else ""
-        since = user.created_at.strftime("%b %Y") if user.created_at else "recently"
+        name_line = f"Name: {user.name}\n"   if user.name       else ""
+        prof_line = f"Role: {user.profession}\n" if user.profession else ""
+        lang_line = f"Lang: {'Kinyarwanda' if user.language == 'rw' else 'English'}\n"
+        sms_line  = "SMS: off\n" if user.sms_opt_out else ""
+        since     = user.created_at.strftime("%b %Y") if user.created_at else "recently"
         return (
             f"END My Account\n"
             f"{name_line}"
             f"{prof_line}"
+            f"{lang_line}"
+            f"{sms_line}"
             f"Queries: {user.total_queries}\n"
-            f"Member since: {since}"
+            f"Since: {since}"
         )
 
-    elif choice == "2":                       # ── Set name ──
+    # ── 2. Set name ───────────────────────────────────────────────────────────
+    elif choice == "2":
         if len(sub) == 1:
             return "CON Enter your name:"
         name = " ".join(sub[1:])[:100].strip()
@@ -261,7 +329,8 @@ async def _handle_account(
         await session_service.clear_profile_cache(phone_number)
         return f"END Name saved: {name}\nDial again to continue."
 
-    elif choice == "3":                       # ── Set profession ──
+    # ── 3. Set profession ─────────────────────────────────────────────────────
+    elif choice == "3":
         if len(sub) == 1:
             return (
                 "CON Select your role:\n"
@@ -278,14 +347,64 @@ async def _handle_account(
         await session_service.clear_profile_cache(phone_number)
         return (
             f"END Role saved: {profession}\n"
-            "AI will now personalise tips for you.\n"
+            "AI will personalise tips for you.\n"
             "Dial again to continue."
         )
+
+    # ── 4. Language ───────────────────────────────────────────────────────────
+    elif choice == "4":
+        if len(sub) == 1:
+            return (
+                "CON Select language:\n"
+                "1.English\n"
+                "2.Kinyarwanda\n"
+                "0.Back"
+            )
+        action = sub[1]
+        if action == "0":
+            return ACCOUNT_MENU
+        lang_map = {"1": "en", "2": "rw"}
+        lang = lang_map.get(action)
+        if not lang:
+            return "END Invalid choice."
+        await _update_user(phone_number, {"language": lang}, db)
+        await session_service.clear_profile_cache(phone_number)
+        lang_name = "Kinyarwanda" if lang == "rw" else "English"
+        return (
+            f"END Language set: {lang_name}\n"
+            "AI will now reply in your language.\n"
+            "Dial again to continue."
+        )
+
+    # ── 5. SMS alerts ─────────────────────────────────────────────────────────
+    elif choice == "5":
+        user = await _get_user(phone_number, db)
+        if len(sub) == 1:
+            status  = "OFF" if user.sms_opt_out else "ON"
+            toggle  = "Turn off SMS" if not user.sms_opt_out else "Turn on SMS"
+            return (
+                f"CON SMS alerts: {status}\n"
+                f"1.{toggle}\n"
+                "0.Back"
+            )
+        action = sub[1]
+        if action == "0":
+            return ACCOUNT_MENU
+        if action == "1":
+            new_val = not user.sms_opt_out
+            await _update_user(phone_number, {"sms_opt_out": new_val}, db)
+            await session_service.clear_profile_cache(phone_number)
+            status = "disabled" if new_val else "enabled"
+            return (
+                f"END SMS alerts {status}.\n"
+                "Dial again to continue."
+            )
+        return "END Invalid option."
 
     return "END Invalid option."
 
 
-# ── Core AI call + formatting ─────────────────────────────────────────────────
+# ── Core AI call + formatting ──────────────────────────────────────────────────
 
 async def _ask_and_respond(
     question: str,
@@ -293,49 +412,69 @@ async def _ask_and_respond(
     session_id: str,
     phone_number: str,
     db: AsyncSession,
+    show_more: bool = False,
 ) -> str:
-    """Call AI (or knowledge cache), format response, fire-and-forget log."""
+    """
+    Call AI (or knowledge cache), format the response, fire-and-forget log.
+
+    show_more=True  → return CON with "1.More tips / 0.Main menu" options
+                       (used for pre-defined topic picks so users can keep browsing)
+    show_more=False → return END  (used for free-form questions)
+    """
     question = question.strip()
     if not question:
         return "END Please enter a question."
 
-    # ── Rate limit check ────────────────────────────────────────────────────
-    allowed, remaining = await session_service.check_rate_limit(phone_number)
+    # ── Rate limit ───────────────────────────────────────────────────────────
+    allowed, _remaining = await session_service.check_rate_limit(phone_number)
     if not allowed:
         return "END You have reached the hourly limit. Please try again later."
 
-    # ── Get user profession for personalisation ──────────────────────────────
-    profession = await _get_cached_profession(phone_number, db)
+    # ── User preferences (profession, language, sms_opt_out) ─────────────────
+    prefs      = await _get_cached_user_prefs(phone_number, db)
+    profession = prefs.get("profession")
+    language   = prefs.get("language", "en") or "en"
+    sms_opt_out = prefs.get("sms_opt_out", False)
 
-    # ── Call AI service ──────────────────────────────────────────────────────
+    # ── Call AI service ───────────────────────────────────────────────────────
     try:
         result = await ai_service.get_ai_response(
             question=question,
             category=category,
             phone_number=phone_number,
             user_profession=profession,
+            language=language,
         )
         ai_text    = result.text
         tokens     = result.tokens_used
         from_cache = result.from_cache
-
     except Exception as exc:
         log.error("AI error for %s: %s", phone_number, exc)
         return "END AI is busy. Please try again in a moment."
 
-    # ── Decide USSD vs SMS ───────────────────────────────────────────────────
+    # ── Format response ───────────────────────────────────────────────────────
     sms_sent = False
 
-    if len(ai_text) > settings.sms_char_limit:
+    if show_more:
+        # CON response with navigation options
+        # Reserve space: 4 ("CON ") + len(_MORE_OPTIONS) = 4 + 22 = 26
+        max_tip = _MAX_USSD_BODY - len("CON ") - len(_MORE_OPTIONS)
+        if len(ai_text) > max_tip:
+            ai_text = ai_text[:max_tip - 1] + "…"
+        response_str = f"CON {ai_text}{_MORE_OPTIONS}"
+
+    elif not sms_opt_out and len(ai_text) > settings.sms_char_limit:
+        # Long free-form answer → truncate for USSD + send full via SMS
         full_sms = sms_service.format_sms_response(category, question, ai_text)
         sms_sent = await sms_service.send_sms(phone_number, full_sms)
         display  = ai_text[: settings.sms_char_limit - 3] + "..."
         note     = "\n\nFull answer sent via SMS." if sms_sent else ""
         response_str = f"END {display}{note}"
+
     else:
         response_str = f"END {ai_text}"
 
-    # ── Log to DB in background (own session — safe after response is sent) ──
+    # ── Log interaction in background (own DB session) ────────────────────────
     asyncio.create_task(
         _log_interaction_bg(
             session_id=session_id,
@@ -352,7 +491,7 @@ async def _ask_and_respond(
     return response_str
 
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
+# ── DB helpers ─────────────────────────────────────────────────────────────────
 
 async def _ensure_user_cached(phone_number: str, db: AsyncSession) -> None:
     """Create user record if it doesn't exist; skip if Redis says it already does."""
@@ -383,18 +522,26 @@ async def _update_user(phone_number: str, fields: dict, db: AsyncSession) -> Non
     await db.commit()
 
 
-async def _get_cached_profession(phone_number: str, db: AsyncSession) -> str | None:
-    """Return user's profession from Redis cache, then DB."""
+async def _get_cached_user_prefs(phone_number: str, db: AsyncSession) -> dict:
+    """
+    Return cached user preferences: profession, language, sms_opt_out, name.
+    Checks Redis profile cache first; falls back to DB on miss.
+    """
     profile = await session_service.get_cached_profile(phone_number)
-    if profile and "profession" in profile:
-        return profile["profession"]
+    # Require all expected keys to be present before trusting the cached value;
+    # old cache entries may be missing sms_opt_out / language.
+    if profile and {"profession", "language", "sms_opt_out"}.issubset(profile):
+        return profile
+
     user = await _get_user(phone_number, db)
-    if user.profession:
-        await session_service.cache_profile(
-            phone_number,
-            {"profession": user.profession, "name": user.name, "language": user.language},
-        )
-    return user.profession
+    prefs: dict = {
+        "name":        user.name,
+        "profession":  user.profession,
+        "language":    user.language or "en",
+        "sms_opt_out": bool(user.sms_opt_out),
+    }
+    await session_service.cache_profile(phone_number, prefs)
+    return prefs
 
 
 async def _log_interaction_bg(

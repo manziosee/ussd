@@ -1,5 +1,13 @@
 version: "3.9"
 
+# ── Production Compose ───────────────────────────────────────────────────────
+# Builds the app image from the local Dockerfile.
+# Override DATABASE_URL / REDIS_URL if using external services (e.g. Neon, Upstash).
+#
+# Development hot-reload:
+#   docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+# ─────────────────────────────────────────────────────────────────────────────
+
 services:
   db:
     image: postgres:16-alpine
@@ -46,12 +54,19 @@ services:
     env_file:
       - .env
     environment:
+      # Override with Docker-internal hostnames (overrides .env values)
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/smartassist
       REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
-    volumes:
-      - .:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    # NOTE: No source-code volume mount here — the image contains the app.
+    # For hot-reload in development, use docker-compose.dev.yml.
 
 volumes:
   postgres_data:

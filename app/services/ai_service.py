@@ -3,8 +3,8 @@ Claude AI service — generates concise, USSD-friendly responses.
 
 Cost optimisations applied
 ──────────────────────────
-1. Anthropic prompt caching (cache_control: ephemeral) — system prompts
-   are cached server-side after first use; subsequent calls save ~90% input tokens.
+1. Anthropic prompt caching (cache_control: ephemeral) — system prompts are
+   cached server-side after first use; subsequent calls save ~90% input tokens.
 2. Redis response caching — same (category, question) pair is answered once
    per AI_CACHE_TTL (default 24 h); zero API cost on cache hits.
 3. claude-haiku-4-5-20251001 — cheapest and fastest model; ideal for USSD latency.
@@ -15,6 +15,12 @@ Personalisation
 When a user has set their profession (farmer / student / business owner / other)
 via the Account menu, it is injected as extra context into the system prompt.
 This costs zero extra tokens because it replaces a placeholder in the cached prompt.
+
+Language support
+────────────────
+When a user has selected Kinyarwanda (language="rw") in the Account menu,
+an instruction is appended to the system prompt so Claude responds in
+Kinyarwanda (Ikinyarwanda).
 """
 from __future__ import annotations
 
@@ -36,13 +42,18 @@ OUTPUT RULES — follow strictly:
 - Maximum 155 characters total (hard limit — USSD screen constraint)
 - ONE focused, actionable tip only — no lists, no preamble
 - Plain text ONLY — no bullet points, no hashtags, no emojis, no markdown
-- Simple English, Grade 8 level maximum
+- Simple language, Grade 8 level maximum
 - Start directly with the advice — no greeting, no "Sure!", no repetition of the question
 """.strip()
 
 _PERSONALIZATION_HINT = (
     "\nUSER CONTEXT: This user is a {profession}. "
     "Tailor your advice specifically for their situation."
+)
+
+_LANGUAGE_HINT = (
+    "\nLANGUAGE: Respond in Kinyarwanda (Ikinyarwanda). "
+    "Use clear, simple language that rural users can understand."
 )
 
 SYSTEM_PROMPTS: dict[str, str] = {
@@ -95,6 +106,7 @@ async def get_ai_response(
     category: str,
     phone_number: str,
     user_profession: str | None = None,
+    language: str = "en",
 ) -> AIResult:
     """
     Return an AI response for a USSD user.
@@ -102,6 +114,13 @@ async def get_ai_response(
     1. Checks Redis cache (category + question as key).
     2. On miss, calls Claude Haiku with prompt caching enabled.
     3. Stores the result in Redis for AI_CACHE_TTL seconds.
+
+    Args:
+        question        — the user's question or the pre-defined topic prompt
+        category        — business | farming | health | education | general
+        phone_number    — used for logging only
+        user_profession — injected into system prompt for personalisation (optional)
+        language        — "en" (default) or "rw" (Kinyarwanda); controls reply language
 
     Raises on API/network errors — callers must catch.
     """
@@ -111,10 +130,14 @@ async def get_ai_response(
         log.debug("AI cache HIT [%s] %s…", category, question[:50])
         return AIResult(text=cached, tokens_used=0, from_cache=True)
 
-    # 2. Build system prompt (inject profession personalisation if available)
+    # 2. Build system prompt
     system_text = SYSTEM_PROMPTS.get(category, SYSTEM_PROMPTS["general"])
+
     if user_profession and user_profession != "other":
         system_text += _PERSONALIZATION_HINT.format(profession=user_profession)
+
+    if language == "rw":
+        system_text += _LANGUAGE_HINT
 
     # 3. Call Claude Haiku
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
@@ -127,7 +150,7 @@ async def get_ai_response(
                 "type": "text",
                 "text": system_text,
                 # Anthropic caches the system prompt after the first request;
-                # all subsequent requests save ~90% on input tokens.
+                # all subsequent calls with the same prompt save ~90% input tokens.
                 "cache_control": {"type": "ephemeral"},
             }
         ],
@@ -135,13 +158,13 @@ async def get_ai_response(
     )
 
     response_text = message.content[0].text.strip()
-    tokens = message.usage.input_tokens + message.usage.output_tokens
+    tokens        = message.usage.input_tokens + message.usage.output_tokens
 
     # 4. Save to Redis cache
     await session_service.cache_ai_response(category, question, response_text)
 
     log.info(
-        "AI call [%s] %d tokens | cached=%s | phone=%s | q=%s",
-        category, tokens, False, phone_number, question[:60],
+        "AI call [%s] %d tokens | lang=%s | phone=%s | q=%s",
+        category, tokens, language, phone_number, question[:60],
     )
     return AIResult(text=response_text, tokens_used=tokens, from_cache=False)

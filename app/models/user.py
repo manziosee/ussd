@@ -1,7 +1,7 @@
 """
 User model — stores persistent info per phone number.
 """
-from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy import Boolean, Column, DateTime, Integer, String
 from sqlalchemy.sql import func
 
 from ..database import Base
@@ -14,9 +14,18 @@ class User(Base):
     phone_number = Column(String(20), unique=True, nullable=False, index=True)
 
     # Profile (optional, set via Account menu)
-    name = Column(String(100), nullable=True)
-    profession = Column(String(100), nullable=True)   # farmer, student, business, other
-    language = Column(String(10), default="en", nullable=False)
+    name       = Column(String(100), nullable=True)
+    profession = Column(String(100), nullable=True)   # farmer | student | business owner | other
+    language   = Column(String(10),  default="en", nullable=False, server_default="en")
+
+    # Preferences
+    sms_opt_out = Column(
+        Boolean,
+        default=False,
+        nullable=False,
+        server_default="false",
+        comment="When True, skip sending full-answer SMS even if response exceeds char limit",
+    )
 
     # Stats
     total_queries = Column(Integer, default=0, nullable=False)
