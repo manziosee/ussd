@@ -3,14 +3,18 @@ Redis-backed session, profile, AI-cache, rate-limit, and user-existence services
 
 Key namespaces
 ──────────────
-  ussd:session:{session_id}           USSD session data          TTL = SESSION_TTL (5 min)
-  ussd:profile:{phone_number}         Cached user profile        TTL = 1 hour
-  ussd:ai:{category}:{question_hash}  Cached AI response         TTL = AI_CACHE_TTL (24 h)
-  ussd:rate:{phone_number}:{hour}     Request counter            TTL = 1 hour (auto-expire)
-  ussd:exists:{phone_number}          User-row-exists flag       TTL = 24 hours
+  ussd:session:{session_id}               USSD session data           TTL = SESSION_TTL (5 min)
+  ussd:profile:{phone_number}             Cached user profile         TTL = 1 hour
+  ussd:ai:{category}:{question_hash}      Cached AI response          TTL = AI_CACHE_TTL (24 h)
+  ussd:rate:{phone_number}:{hour}         Request counter             TTL = 1 hour (auto-expire)
+  ussd:exists:{phone_number}              User-row-exists flag        TTL = 24 hours
+  ussd:dedup:{session_id}:{text_hash}     Dedup cache for AT retries  TTL = 30 s
+  ussd:resume:{phone_number}              Last CON position for resume TTL = 10 min
+  ussd:resume_offered:{session_id}        Flag: resume prompt shown    TTL = SESSION_TTL
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -25,6 +29,12 @@ settings = get_settings()
 
 # Max AI queries a single phone number may make per hour
 RATE_LIMIT_PER_HOUR = 50
+
+# Dedup window (seconds) — covers Africa's Talking retry delay
+_DEDUP_TTL = 30
+
+# How long to remember a dropped-session resume position (seconds)
+_RESUME_TTL = 600   # 10 minutes
 
 # Module-level Redis pool — initialised once at app startup
 _redis: aioredis.Redis | None = None
@@ -78,7 +88,7 @@ async def close_redis() -> None:
         log.info("Redis connection closed.")
 
 
-# ── USSD Session ─────────────────────────────────────────────────────────────
+# ── USSD Session ──────────────────────────────────────────────────────────────
 
 def _session_key(session_id: str) -> str:
     return f"ussd:session:{session_id}"
@@ -168,7 +178,7 @@ async def check_rate_limit(phone_number: str) -> tuple[bool, int]:
     return allowed, remaining
 
 
-# ── User-exists flag (avoids a DB SELECT on every USSD request) ───────────────
+# ── User-exists flag ──────────────────────────────────────────────────────────
 
 def _exists_key(phone: str) -> str:
     return f"ussd:exists:{phone}"
@@ -182,3 +192,78 @@ async def user_exists_cached(phone_number: str) -> bool:
 async def mark_user_exists(phone_number: str) -> None:
     r = get_redis()
     await r.setex(_exists_key(phone_number), 86400, "1")
+
+
+# ── Webhook deduplication ─────────────────────────────────────────────────────
+# Africa's Talking retries the same (sessionId, text) if our response is slow.
+# We cache the response for _DEDUP_TTL seconds so retries get the exact same reply.
+
+def _dedup_key(session_id: str, text: str) -> str:
+    # Hash text so the key is short and safe for any input
+    text_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
+    return f"ussd:dedup:{session_id}:{text_hash}"
+
+
+async def get_dedup_response(session_id: str, text: str) -> str | None:
+    """Return the cached response for this (session, text) pair, or None."""
+    r = get_redis()
+    return await r.get(_dedup_key(session_id, text))
+
+
+async def store_dedup_response(session_id: str, text: str, response: str) -> None:
+    """Cache the response so AT retries within the next 30 s get the same reply."""
+    r = get_redis()
+    await r.setex(_dedup_key(session_id, text), _DEDUP_TTL, response)
+
+
+# ── Session resume after drop ─────────────────────────────────────────────────
+# When a CON response is sent we save the current text input as "resume position".
+# If the user's session drops (poor signal) and they re-dial, they are offered
+# the chance to jump straight back to where they were.
+
+def _resume_key(phone: str) -> str:
+    return f"ussd:resume:{phone}"
+
+
+async def get_resume_position(phone_number: str) -> dict | None:
+    """Return {text, label} saved from the last CON response, or None."""
+    r = get_redis()
+    raw = await r.get(_resume_key(phone_number))
+    return json.loads(raw) if raw else None
+
+
+async def set_resume_position(phone_number: str, text: str, label: str) -> None:
+    """Save current menu position so the user can resume after a session drop."""
+    r = get_redis()
+    data = {"text": text, "label": label}
+    await r.setex(_resume_key(phone_number), _RESUME_TTL, json.dumps(data))
+
+
+async def clear_resume_position(phone_number: str) -> None:
+    """Clear the saved position (call on END response or explicit main-menu return)."""
+    r = get_redis()
+    await r.delete(_resume_key(phone_number))
+
+
+# ── Resume-offered flag ───────────────────────────────────────────────────────
+# Tracks whether the "Resume? 1.Yes 2.No" prompt was already shown in this
+# session — prevents routing collisions where "1" means both "Yes, resume"
+# and "Business category".
+
+def _resume_offered_key(session_id: str) -> str:
+    return f"ussd:resume_offered:{session_id}"
+
+
+async def was_resume_offered(session_id: str) -> bool:
+    r = get_redis()
+    return await r.exists(_resume_offered_key(session_id)) == 1
+
+
+async def mark_resume_offered(session_id: str) -> None:
+    r = get_redis()
+    await r.setex(_resume_offered_key(session_id), settings.session_ttl, "1")
+
+
+async def clear_resume_offered(session_id: str) -> None:
+    r = get_redis()
+    await r.delete(_resume_offered_key(session_id))

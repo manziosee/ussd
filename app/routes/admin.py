@@ -1,15 +1,20 @@
 """
-Admin API — protected by X-Admin-Key header.
+Admin API — protected by X-Admin-Key header (or ?key= query param for browser).
 
 All routes require:
     X-Admin-Key: <ADMIN_API_KEY from .env>
+  OR (for browser / dashboard):
+    ?key=<ADMIN_API_KEY>
 
 Returns 401 on wrong key, 503 if ADMIN_API_KEY is not configured.
 """
+import json
 import logging
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import HTMLResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,7 +26,6 @@ from ..schemas.ussd import AdminStats, InteractionOut
 
 log = logging.getLogger(__name__)
 
-# Every route in this router automatically requires a valid admin key
 router = APIRouter(
     prefix="/admin",
     tags=["Admin"],
@@ -29,13 +33,14 @@ router = APIRouter(
 )
 
 
+# ── JSON API endpoints ─────────────────────────────────────────────────────────
+
 @router.get("/stats", response_model=AdminStats, summary="Aggregated platform stats")
 async def get_stats(db: AsyncSession = Depends(get_db)) -> AdminStats:
     """Overview of users, queries, token usage, cache performance, and SMS."""
-
-    total_users       = (await db.execute(select(func.count(User.id)))).scalar_one()
+    total_users        = (await db.execute(select(func.count(User.id)))).scalar_one()
     total_interactions = (await db.execute(select(func.count(Interaction.id)))).scalar_one()
-    total_tokens      = (await db.execute(select(func.sum(Interaction.tokens_used)))).scalar_one() or 0
+    total_tokens       = (await db.execute(select(func.sum(Interaction.tokens_used)))).scalar_one() or 0
 
     cached_count = (
         await db.execute(
@@ -48,8 +53,8 @@ async def get_stats(db: AsyncSession = Depends(get_db)) -> AdminStats:
         )
     ).scalar_one()
 
-    cache_rate   = (cached_count / total_interactions) if total_interactions else 0.0
-    cat_rows     = (
+    cache_rate = (cached_count / total_interactions) if total_interactions else 0.0
+    cat_rows   = (
         await db.execute(
             select(Interaction.category, func.count(Interaction.id).label("cnt"))
             .group_by(Interaction.category)
@@ -97,13 +102,276 @@ async def list_users(
     ).scalars().all()
     return [
         {
-            "id":           u.id,
-            "phone_number": u.phone_number,
-            "name":         u.name,
-            "profession":   u.profession,
-            "language":     u.language,
+            "id":            u.id,
+            "phone_number":  u.phone_number,
+            "name":          u.name,
+            "profession":    u.profession,
+            "language":      u.language,
+            "sms_opt_out":   u.sms_opt_out,
             "total_queries": u.total_queries,
-            "created_at":   u.created_at,
+            "created_at":    u.created_at,
         }
         for u in rows
     ]
+
+
+# ── HTML Dashboard ─────────────────────────────────────────────────────────────
+
+_DASHBOARD_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SmartAssist — Admin</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    *{{box-sizing:border-box;margin:0;padding:0}}
+    body{{font-family:system-ui,-apple-system,sans-serif;background:#f3f4f6;color:#111}}
+    a{{color:#166534;text-decoration:none}}
+    header{{background:#166534;color:#fff;padding:1rem 2rem;display:flex;align-items:center;gap:1rem}}
+    header h1{{font-size:1.25rem;font-weight:700}}
+    header span{{font-size:.8rem;opacity:.75;margin-left:auto}}
+    main{{max-width:1140px;margin:2rem auto;padding:0 1rem}}
+    .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1rem;margin-bottom:2rem}}
+    .card{{background:#fff;border-radius:10px;padding:1.1rem 1.3rem;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
+    .card .v{{font-size:2rem;font-weight:700;color:#166534;line-height:1.1}}
+    .card .l{{font-size:.78rem;color:#6b7280;margin-top:.3rem;text-transform:uppercase;letter-spacing:.04em}}
+    .row{{display:grid;grid-template-columns:340px 1fr;gap:1.5rem;margin-bottom:2rem}}
+    @media(max-width:750px){{.row{{grid-template-columns:1fr}}}}
+    .panel{{background:#fff;border-radius:10px;padding:1.2rem;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
+    .panel h2{{font-size:.8rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;margin-bottom:1rem}}
+    .chart-wrap{{position:relative;height:220px}}
+    table{{width:100%;border-collapse:collapse;font-size:.82rem}}
+    thead th{{background:#f9fafb;padding:.55rem .7rem;text-align:left;font-size:.75rem;font-weight:600;
+              color:#6b7280;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #e5e7eb}}
+    tbody td{{padding:.55rem .7rem;border-bottom:1px solid #f3f4f6;vertical-align:top}}
+    tbody tr:last-child td{{border:none}}
+    .pill{{display:inline-block;padding:.15rem .5rem;border-radius:999px;font-size:.7rem;font-weight:600}}
+    .pill-cache{{background:#dcfce7;color:#166534}}
+    .pill-live {{background:#dbeafe;color:#1e40af}}
+    .pill-sms  {{background:#fef9c3;color:#854d0e}}
+    .trunc{{max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+    footer{{text-align:center;padding:2rem;font-size:.75rem;color:#9ca3af}}
+  </style>
+</head>
+<body>
+<header>
+  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <path d="M3 3h18v13H3z"/><path d="M8 21h8M12 17v4"/>
+  </svg>
+  <h1>SmartAssist — Admin Dashboard</h1>
+  <span>Refreshed {now} UTC &nbsp;|&nbsp; <a href="/docs" style="color:#86efac">API Docs</a></span>
+</header>
+
+<main>
+  <!-- ── Stat cards ────────────────────────────────────────────── -->
+  <div class="cards">
+    <div class="card"><div class="v">{total_users}</div><div class="l">Total Users</div></div>
+    <div class="card"><div class="v">{total_interactions}</div><div class="l">Total Queries</div></div>
+    <div class="card"><div class="v">{cache_rate}%</div><div class="l">Cache Hit Rate</div></div>
+    <div class="card"><div class="v">{total_tokens:,}</div><div class="l">Tokens Used</div></div>
+    <div class="card"><div class="v">{sms_count}</div><div class="l">SMS Sent</div></div>
+  </div>
+
+  <!-- ── Chart + recent interactions ─────────────────────────── -->
+  <div class="row">
+    <div class="panel">
+      <h2>Queries by Category</h2>
+      <div class="chart-wrap">
+        <canvas id="catChart"></canvas>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Recent Interactions</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Phone</th><th>Category</th><th>Question</th><th>Type</th><th>Time (UTC)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows_html}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── Users table ──────────────────────────────────────────── -->
+  <div class="panel" style="margin-bottom:2rem">
+    <h2>Registered Users <span style="font-weight:400;color:#9ca3af">(latest {user_count})</span></h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Phone</th><th>Name</th><th>Profession</th><th>Language</th>
+          <th>SMS</th><th>Queries</th><th>Joined</th>
+        </tr>
+      </thead>
+      <tbody>
+        {users_html}
+      </tbody>
+    </table>
+  </div>
+</main>
+
+<footer>
+  SmartAssist USSD &nbsp;·&nbsp;
+  <a href="/admin/stats">Stats JSON</a> &nbsp;·&nbsp;
+  <a href="/admin/interactions">Interactions JSON</a> &nbsp;·&nbsp;
+  <a href="/admin/users">Users JSON</a>
+</footer>
+
+<script>
+(function(){{
+  const labels = {cat_labels_json};
+  const values = {cat_values_json};
+  const colours = ['#166534','#15803d','#16a34a','#22c55e','#4ade80','#86efac'];
+  new Chart(document.getElementById('catChart'), {{
+    type: 'bar',
+    data: {{
+      labels,
+      datasets: [{{
+        label: 'Queries',
+        data: values,
+        backgroundColor: colours.slice(0, labels.length),
+        borderRadius: 5,
+        borderSkipped: false,
+      }}]
+    }},
+    options: {{
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {{ legend: {{ display: false }} }},
+      scales: {{
+        y: {{ beginAtZero: true, ticks: {{ stepSize: 1, precision: 0 }} }},
+        x: {{ grid: {{ display: false }} }}
+      }}
+    }}
+  }});
+}})();
+</script>
+</body>
+</html>
+"""
+
+
+def _phone_mask(phone: str) -> str:
+    """Partially mask a phone number for display: +2507881****56"""
+    if len(phone) <= 6:
+        return phone
+    return phone[:7] + "****" + phone[-2:]
+
+
+def _interaction_rows(interactions: list) -> str:
+    rows = []
+    for i in interactions:
+        source = (
+            '<span class="pill pill-cache">cache</span>'
+            if i.from_cache else
+            '<span class="pill pill-live">live AI</span>'
+        )
+        if i.sms_sent:
+            source += ' <span class="pill pill-sms">SMS</span>'
+        ts = i.created_at.strftime("%m-%d %H:%M") if i.created_at else "—"
+        rows.append(
+            f"<tr>"
+            f"<td>{_phone_mask(i.phone_number)}</td>"
+            f"<td>{i.category}</td>"
+            f'<td class="trunc" title="{i.question}">{i.question[:60]}</td>'
+            f"<td>{source}</td>"
+            f"<td style='white-space:nowrap'>{ts}</td>"
+            f"</tr>"
+        )
+    return "\n".join(rows) if rows else "<tr><td colspan='5' style='color:#9ca3af;text-align:center'>No interactions yet</td></tr>"
+
+
+def _user_rows(users: list) -> str:
+    lang_map = {"en": "English", "rw": "Kinyarwanda"}
+    rows = []
+    for u in users:
+        sms  = "off" if u.sms_opt_out else "on"
+        lang = lang_map.get(u.language or "en", u.language or "en")
+        joined = u.created_at.strftime("%Y-%m-%d") if u.created_at else "—"
+        rows.append(
+            f"<tr>"
+            f"<td>{_phone_mask(u.phone_number)}</td>"
+            f"<td>{u.name or '—'}</td>"
+            f"<td>{u.profession or '—'}</td>"
+            f"<td>{lang}</td>"
+            f"<td>{sms}</td>"
+            f"<td>{u.total_queries}</td>"
+            f"<td style='white-space:nowrap'>{joined}</td>"
+            f"</tr>"
+        )
+    return "\n".join(rows) if rows else "<tr><td colspan='7' style='color:#9ca3af;text-align:center'>No users yet</td></tr>"
+
+
+@router.get(
+    "/dashboard",
+    response_class=HTMLResponse,
+    summary="Admin HTML dashboard — browser-friendly stats + charts",
+)
+async def admin_dashboard(db: AsyncSession = Depends(get_db)) -> HTMLResponse:
+    """
+    Server-rendered HTML dashboard with Chart.js category chart, stats cards,
+    recent interactions, and user table.
+
+    Access in browser: GET /admin/dashboard?key=<ADMIN_API_KEY>
+    """
+    # ── Fetch data ────────────────────────────────────────────────────────────
+    total_users        = (await db.execute(select(func.count(User.id)))).scalar_one()
+    total_interactions = (await db.execute(select(func.count(Interaction.id)))).scalar_one()
+    total_tokens       = (await db.execute(select(func.sum(Interaction.tokens_used)))).scalar_one() or 0
+
+    cached_count = (
+        await db.execute(
+            select(func.count(Interaction.id)).where(Interaction.from_cache == True)  # noqa: E712
+        )
+    ).scalar_one()
+    sms_count = (
+        await db.execute(
+            select(func.count(Interaction.id)).where(Interaction.sms_sent == True)  # noqa: E712
+        )
+    ).scalar_one()
+
+    cache_rate = round((cached_count / total_interactions * 100) if total_interactions else 0.0, 1)
+
+    cat_rows = (
+        await db.execute(
+            select(Interaction.category, func.count(Interaction.id).label("cnt"))
+            .group_by(Interaction.category)
+            .order_by(func.count(Interaction.id).desc())
+        )
+    ).all()
+
+    recent = (
+        await db.execute(
+            select(Interaction).order_by(Interaction.created_at.desc()).limit(15)
+        )
+    ).scalars().all()
+
+    users = (
+        await db.execute(
+            select(User).order_by(User.created_at.desc()).limit(20)
+        )
+    ).scalars().all()
+
+    # ── Render ────────────────────────────────────────────────────────────────
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    cat_labels = [r.category.capitalize() for r in cat_rows]
+    cat_values = [r.cnt for r in cat_rows]
+
+    html = _DASHBOARD_HTML.format(
+        now=now,
+        total_users=total_users,
+        total_interactions=total_interactions,
+        cache_rate=cache_rate,
+        total_tokens=total_tokens,
+        sms_count=sms_count,
+        cat_labels_json=json.dumps(cat_labels),
+        cat_values_json=json.dumps(cat_values),
+        rows_html=_interaction_rows(recent),
+        users_html=_user_rows(users),
+        user_count=len(users),
+    )
+    return HTMLResponse(content=html)

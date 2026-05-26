@@ -32,25 +32,31 @@ _admin_key_header = APIKeyHeader(name="X-Admin-Key", auto_error=False)
 
 async def require_admin_key(
     api_key: str | None = Depends(_admin_key_header),
+    key:     str | None = Query(default=None, include_in_schema=False),
 ) -> str:
     """
     FastAPI dependency — inject into any route that should be admin-only.
 
-    Usage:
-        @router.get("/stats", dependencies=[Depends(require_admin_key)])
+    Accepts the admin key in either form:
+      • HTTP header:   X-Admin-Key: <key>   (for API clients / curl)
+      • Query param:   ?key=<key>           (for browser access to /admin/dashboard)
+
+    Returns HTTP 401 on wrong / missing key.
+    Returns HTTP 503 if ADMIN_API_KEY is not set in .env.
     """
+    effective_key = api_key or key
     if not settings.admin_api_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Admin API is disabled. Set ADMIN_API_KEY in .env to enable it.",
         )
-    if api_key != settings.admin_api_key:
+    if effective_key != settings.admin_api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing X-Admin-Key header.",
             headers={"WWW-Authenticate": "ApiKey"},
         )
-    return api_key
+    return effective_key
 
 
 # ── Africa's Talking webhook token ────────────────────────────────────────────

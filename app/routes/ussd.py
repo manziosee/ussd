@@ -36,6 +36,7 @@ from ..auth import verify_at_token
 from ..config import get_settings
 from ..database import get_db
 from ..schemas.ussd import SimulateRequest
+from ..services import session_service
 from ..services.menu_service import process_ussd
 
 log = logging.getLogger(__name__)
@@ -111,7 +112,14 @@ async def ussd_callback(
 
     log.info("USSD | session=%s phone=%s text=%r", session_id, phone_number, text)
 
-    # 4. Process USSD
+    # 4. Deduplication — AT retries the same callback if our response is slow.
+    #    Return the cached reply immediately so the user isn't charged twice.
+    cached_response = await session_service.get_dedup_response(session_id, text)
+    if cached_response is not None:
+        log.info("USSD dedup hit | session=%s", session_id)
+        return cached_response
+
+    # 5. Process USSD
     try:
         response = await process_ussd(
             session_id=session_id,
@@ -122,6 +130,9 @@ async def ussd_callback(
     except Exception as exc:
         log.exception("Unhandled error in USSD handler: %s", exc)
         response = "END Sorry, a system error occurred. Please try again."
+
+    # 6. Cache for 30 s so AT retries within the retry window get the same reply
+    await session_service.store_dedup_response(session_id, text, response)
 
     log.info("USSD → %r", response[:80])
     return response

@@ -18,15 +18,33 @@ Menu tree
   ├─ 5. Ask AI      →  free-form question
   └─ 6. Account     →  stats · name · profession · language · SMS settings
 
-"More tips" flow (predefined topics 1-4 per category)
-──────────────────────────────────────────────────────
+Input sanitisation
+──────────────────
+Raw AT text goes through _sanitize() before any routing:
+  • Trailing # stripped (AT sometimes appends it)
+  • Double-* collapses into a single separator (e.g. "1**2" → ["1","2"])
+  • Leading/trailing whitespace removed from every segment
+  • Total text capped at 200 chars — rejects abusive inputs
+
+"More tips" CON flow (predefined topics 1-4 per category)
+──────────────────────────────────────────────────────────
 After the first tip, the response is CON (not END), offering:
   1.More tips  → AI generates a fresh variation tip
   0.Main menu  → back to root
 
-The AT text accumulates: "1*2" → first tip, "1*2*1" → variation,
+Text accumulates: "1*2" → first tip, "1*2*1" → variation,
 "1*2*1*1" → another variation, "1*2*0" → main menu.
 _handle_category detects post_actions = sub[1:] to route accordingly.
+
+Session resume after drop
+─────────────────────────
+On every CON response the current text (menu position) is saved to Redis
+under ussd:resume:{phone} with a 10-minute TTL.
+When a user re-dials after a drop (text="", new sessionId, resume exists)
+they see:
+  "CON Resume where you left off? 1.Yes - <label>  2.New session"
+Pressing 1 re-processes the saved text; pressing 2 clears it and shows
+the normal main menu.
 
 Bug notes
 ─────────
@@ -52,8 +70,11 @@ log = logging.getLogger(__name__)
 settings = get_settings()
 
 # ── AT USSD response body limit ───────────────────────────────────────────────
-_MAX_USSD_BODY  = 182              # safe AT limit (chars total incl. CON/END prefix)
-_MORE_OPTIONS   = "\n1.More tips\n0.Main menu"   # appended to CON tip responses (22 chars)
+_MAX_USSD_BODY = 182               # safe AT limit (chars total, incl. CON/END prefix)
+_MORE_OPTIONS  = "\n1.More tips\n0.Main menu"   # 22 chars — appended to tip CON responses
+
+# ── Max raw text length — guards against excessively long / malformed inputs ──
+_MAX_INPUT_LEN = 200
 
 # ── Static menu strings ───────────────────────────────────────────────────────
 
@@ -145,6 +166,58 @@ _TOPICS: dict[str, dict[str, str]] = {
     },
 }
 
+# ── Resume position labels ────────────────────────────────────────────────────
+
+_CAT_LABELS: dict[str, str] = {
+    "1": "Business", "2": "Farming", "3": "Health",
+    "4": "Education", "5": "Ask AI", "6": "Account",
+}
+_ROUTE_TO_CAT: dict[str, str] = {
+    "1": "business", "2": "farming", "3": "health", "4": "education",
+}
+_TOPIC_SHORT: dict[str, dict[str, str]] = {
+    "business":  {"1": "Pricing",    "2": "Bookkeeping", "3": "Marketing",  "4": "Customers"},
+    "farming":   {"1": "Soil tips",  "2": "Pest ctrl",   "3": "Best crops", "4": "Prices"},
+    "health":    {"1": "Nutrition",  "2": "Hygiene",     "3": "Maternal",   "4": "Child hlth"},
+    "education": {"1": "Study tips", "2": "Career",      "3": "Math",       "4": "English"},
+}
+
+
+def _get_position_label(level1: str, sub: list[str]) -> str:
+    """Human-readable label for the resume prompt, e.g. 'Business: Bookkeeping'."""
+    cat_label = _CAT_LABELS.get(level1, "Menu")
+    cat_key   = _ROUTE_TO_CAT.get(level1)
+    if not sub or not cat_key:
+        return cat_label
+    topic = _TOPIC_SHORT.get(cat_key, {}).get(sub[0])
+    return f"{cat_label}: {topic}" if topic else cat_label
+
+
+# ── Input sanitisation ────────────────────────────────────────────────────────
+
+def _sanitize(text: str) -> tuple[str, list[str]]:
+    """
+    Clean raw USSD text and split into input segments.
+
+    Returns (clean_text, segments) where:
+      clean_text — normalised string suitable as a Redis resume key
+      segments   — list of non-empty, stripped segment strings
+
+    Handles:
+      • Trailing '#' from AT (e.g. "*384*72275#" → stripped by AT, but just in case)
+      • Double-star  "1**2"  → ["1", "2"]  (empty segments discarded)
+      • Whitespace around segments  " 1 * 2 " → ["1", "2"]
+      • Length guard: inputs > 200 chars treated as empty (returns error flag)
+    """
+    raw = (text or "").strip().rstrip("#").strip()
+
+    # Length guard — prevent excessively long / abusive inputs
+    if len(raw) > _MAX_INPUT_LEN:
+        return "__TOO_LONG__", []
+
+    segments = [p.strip() for p in raw.split("*") if p.strip()]
+    return raw, segments
+
 
 # ── Main entry point ───────────────────────────────────────────────────────────
 
@@ -158,18 +231,46 @@ async def process_ussd(
     Parse accumulated USSD text and return the appropriate CON / END string.
     Called once per user keypress.
     """
-    # Ensure user record exists (idempotent; skipped if Redis flags it exists)
     await _ensure_user_cached(phone_number, db)
 
-    clean  = (text or "").strip()
-    inputs = [p.strip() for p in clean.split("*")] if clean else []
+    # 1. Sanitise input
+    clean, inputs = _sanitize(text)
+    if clean == "__TOO_LONG__":
+        return "END Input too long. Please dial again."
 
+    # 2. Handle fresh dial (text is empty / no segments)
     if not inputs:
+        resume = await session_service.get_resume_position(phone_number)
+        if resume:
+            already_offered = await session_service.was_resume_offered(session_id)
+            if not already_offered:
+                await session_service.mark_resume_offered(session_id)
+                label = resume.get("label", "last session")
+                return (
+                    f"CON Resume where you left off?\n"
+                    f"1.Yes - {label}\n"
+                    "2.New session"
+                )
         return MAIN_MENU
 
     level1 = inputs[0]
     sub    = inputs[1:]
 
+    # 3. Handle resume decision — the user responded to the "Resume?" prompt
+    if await session_service.was_resume_offered(session_id):
+        await session_service.clear_resume_offered(session_id)
+        if level1 == "1":
+            resume = await session_service.get_resume_position(phone_number)
+            await session_service.clear_resume_position(phone_number)
+            if resume and resume.get("text"):
+                # Re-process with the saved text; the inner call handles routing
+                return await process_ussd(session_id, phone_number, resume["text"], db)
+        else:
+            # "2" = new session, or any unexpected input → clear and show main menu
+            await session_service.clear_resume_position(phone_number)
+        return MAIN_MENU
+
+    # 4. Normal routing — capture response so we can save position afterwards
     route = {
         "1": ("business",  BUSINESS_MENU),
         "2": ("farming",   FARMING_MENU),
@@ -179,15 +280,26 @@ async def process_ussd(
 
     if level1 in route:
         cat, menu = route[level1]
-        return await _handle_category(cat, menu, sub, session_id, phone_number, db)
+        response = await _handle_category(cat, menu, sub, session_id, phone_number, db)
     elif level1 == "5":
-        return await _handle_ask_ai(sub, session_id, phone_number, db)
+        response = await _handle_ask_ai(sub, session_id, phone_number, db)
     elif level1 == "6":
-        return await _handle_account(sub, phone_number, db)
+        response = await _handle_account(sub, phone_number, db)
     elif level1 == "0":
-        return MAIN_MENU
+        response = MAIN_MENU
     else:
-        return "END Invalid option. Please dial again."
+        response = "END Invalid option. Please dial again."
+
+    # 5. Save / clear resume position
+    #    • CON and not at root → save so user can resume if signal drops
+    #    • END or explicit "0" → clear (session ended or user navigated to root)
+    if response.startswith("CON") and level1 != "0":
+        label = _get_position_label(level1, sub)
+        await session_service.set_resume_position(phone_number, clean, label)
+    else:
+        await session_service.clear_resume_position(phone_number)
+
+    return response
 
 
 # ── Category handler ───────────────────────────────────────────────────────────
@@ -204,12 +316,13 @@ async def _handle_category(
     Route within a category (business / farming / health / education).
 
     sub  = everything after the level-1 digit:
-      []        → show category menu
-      ["2"]     → first view of bookkeeping tip  (returns CON with More/Back)
-      ["2","1"] → "More tips" after bookkeeping  (returns CON with More/Back)
-      ["2","0"] → go back to main menu
-      ["5"]     → prompt for free-form question
-      ["5","q"] → free-form question text
+      []           → show category menu
+      ["2"]        → first view of topic tip      (CON with More/Back)
+      ["2","1"]    → "More tips" after first tip  (CON with More/Back)
+      ["2","1","1"]→ another variation            (CON with More/Back)
+      ["2","0"]    → back to main menu
+      ["5"]        → prompt for free-form question
+      ["5","q"]    → submit free-form question
     """
     if not sub:
         return menu_text
@@ -232,15 +345,14 @@ async def _handle_category(
     if choice not in topic_map:
         return "END Invalid option."
 
-    # post_actions: inputs after the first topic selection
-    # e.g. sub=["2"]        → []          first view
-    #      sub=["2","1"]    → ["1"]       "More tips" once
-    #      sub=["2","1","1"]→ ["1","1"]   "More tips" twice
-    #      sub=["2","0"]    → ["0"]       back to main
+    # post_actions: inputs received after the first tip was shown
+    #   sub=["2"]         → []       first view of topic
+    #   sub=["2","1"]     → ["1"]    first "More tips"
+    #   sub=["2","1","1"] → ["1","1"]  second "More tips"
+    #   sub=["2","0"]     → ["0"]    back to main
     post_actions = sub[1:]
 
     if not post_actions:
-        # First view — show tip with continuation options
         return await _ask_and_respond(
             topic_map[choice], category, session_id, phone_number, db, show_more=True
         )
@@ -251,7 +363,6 @@ async def _handle_category(
         return MAIN_MENU
 
     if last_action == "1":
-        # User wants a fresh variation on the same topic
         variation_q = topic_map[choice] + " Give a completely different, fresh practical tip."
         return await _ask_and_respond(
             variation_q, category, session_id, phone_number, db, show_more=True
@@ -303,13 +414,13 @@ async def _handle_account(
     # ── 1. My stats ──────────────────────────────────────────────────────────
     elif choice == "1":
         user = await _get_user(phone_number, db)
-        name_line = f"Name: {user.name}\n"   if user.name       else ""
-        prof_line = f"Role: {user.profession}\n" if user.profession else ""
+        name_line = f"Name: {user.name}\n"           if user.name       else ""
+        prof_line = f"Role: {user.profession}\n"      if user.profession else ""
         lang_line = f"Lang: {'Kinyarwanda' if user.language == 'rw' else 'English'}\n"
-        sms_line  = "SMS: off\n" if user.sms_opt_out else ""
-        since     = user.created_at.strftime("%b %Y") if user.created_at else "recently"
+        sms_line  = "SMS: off\n"                      if user.sms_opt_out else ""
+        since     = user.created_at.strftime("%b %Y") if user.created_at  else "recently"
         return (
-            f"END My Account\n"
+            "END My Account\n"
             f"{name_line}"
             f"{prof_line}"
             f"{lang_line}"
@@ -395,10 +506,7 @@ async def _handle_account(
             await _update_user(phone_number, {"sms_opt_out": new_val}, db)
             await session_service.clear_profile_cache(phone_number)
             status = "disabled" if new_val else "enabled"
-            return (
-                f"END SMS alerts {status}.\n"
-                "Dial again to continue."
-            )
+            return f"END SMS alerts {status}.\nDial again to continue."
         return "END Invalid option."
 
     return "END Invalid option."
@@ -417,26 +525,26 @@ async def _ask_and_respond(
     """
     Call AI (or knowledge cache), format the response, fire-and-forget log.
 
-    show_more=True  → return CON with "1.More tips / 0.Main menu" options
-                       (used for pre-defined topic picks so users can keep browsing)
-    show_more=False → return END  (used for free-form questions)
+    show_more=True  → return CON with "1.More tips / 0.Main menu"
+                       (used for pre-defined topics so users can keep browsing)
+    show_more=False → return END (used for free-form questions)
     """
     question = question.strip()
     if not question:
         return "END Please enter a question."
 
-    # ── Rate limit ───────────────────────────────────────────────────────────
+    # Rate limit
     allowed, _remaining = await session_service.check_rate_limit(phone_number)
     if not allowed:
         return "END You have reached the hourly limit. Please try again later."
 
-    # ── User preferences (profession, language, sms_opt_out) ─────────────────
-    prefs      = await _get_cached_user_prefs(phone_number, db)
-    profession = prefs.get("profession")
-    language   = prefs.get("language", "en") or "en"
+    # User preferences (profession, language, sms_opt_out)
+    prefs       = await _get_cached_user_prefs(phone_number, db)
+    profession  = prefs.get("profession")
+    language    = prefs.get("language", "en") or "en"
     sms_opt_out = prefs.get("sms_opt_out", False)
 
-    # ── Call AI service ───────────────────────────────────────────────────────
+    # Call AI service
     try:
         result = await ai_service.get_ai_response(
             question=question,
@@ -452,12 +560,11 @@ async def _ask_and_respond(
         log.error("AI error for %s: %s", phone_number, exc)
         return "END AI is busy. Please try again in a moment."
 
-    # ── Format response ───────────────────────────────────────────────────────
+    # Format response
     sms_sent = False
 
     if show_more:
-        # CON response with navigation options
-        # Reserve space: 4 ("CON ") + len(_MORE_OPTIONS) = 4 + 22 = 26
+        # Reserve space: "CON " (4) + options (22) = 26 overhead
         max_tip = _MAX_USSD_BODY - len("CON ") - len(_MORE_OPTIONS)
         if len(ai_text) > max_tip:
             ai_text = ai_text[:max_tip - 1] + "…"
@@ -474,7 +581,7 @@ async def _ask_and_respond(
     else:
         response_str = f"END {ai_text}"
 
-    # ── Log interaction in background (own DB session) ────────────────────────
+    # Log interaction in background (own DB session — safe after HTTP response)
     asyncio.create_task(
         _log_interaction_bg(
             session_id=session_id,
@@ -494,7 +601,7 @@ async def _ask_and_respond(
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 
 async def _ensure_user_cached(phone_number: str, db: AsyncSession) -> None:
-    """Create user record if it doesn't exist; skip if Redis says it already does."""
+    """Create user record if it doesn't exist; skip if Redis flags it exists."""
     if await session_service.user_exists_cached(phone_number):
         return
     result = await db.execute(select(User).where(User.phone_number == phone_number))
@@ -526,10 +633,9 @@ async def _get_cached_user_prefs(phone_number: str, db: AsyncSession) -> dict:
     """
     Return cached user preferences: profession, language, sms_opt_out, name.
     Checks Redis profile cache first; falls back to DB on miss.
+    Old cache entries missing any of the three required keys are invalidated.
     """
     profile = await session_service.get_cached_profile(phone_number)
-    # Require all expected keys to be present before trusting the cached value;
-    # old cache entries may be missing sms_opt_out / language.
     if profile and {"profession", "language", "sms_opt_out"}.issubset(profile):
         return profile
 
