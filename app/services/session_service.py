@@ -288,3 +288,46 @@ async def get_last_ai_response(phone_number: str, category: str) -> str | None:
     """Return the most recent AI response for this user + category, or None."""
     r = get_redis()
     return await r.get(_last_response_key(phone_number, category))
+
+
+# ── Long-response pagination ──────────────────────────────────────────────────
+# When a free-form AI response exceeds the USSD display limit and SMS is not
+# available, we split it into pages stored here.  The user navigates with
+# 1=Next / 0=Stop and gets each chunk as a CON (last chunk as END).
+
+def _pages_key(session_id: str) -> str:
+    return f"ussd:pages:{session_id}"
+
+
+async def set_paged_response(session_id: str, remaining_pages: list[str]) -> None:
+    """Store the list of pages not yet shown (page 1 is already returned to caller)."""
+    r = get_redis()
+    await r.setex(_pages_key(session_id), settings.session_ttl, json.dumps(remaining_pages))
+
+
+async def pop_next_page(session_id: str) -> str | None:
+    """Remove and return the next pending page; delete key when list is exhausted."""
+    r = get_redis()
+    raw = await r.get(_pages_key(session_id))
+    if not raw:
+        return None
+    pages: list[str] = json.loads(raw)
+    if not pages:
+        await r.delete(_pages_key(session_id))
+        return None
+    page = pages.pop(0)
+    if pages:
+        await r.setex(_pages_key(session_id), settings.session_ttl, json.dumps(pages))
+    else:
+        await r.delete(_pages_key(session_id))
+    return page
+
+
+async def has_pending_pages(session_id: str) -> bool:
+    r = get_redis()
+    return await r.exists(_pages_key(session_id)) == 1
+
+
+async def clear_paged_response(session_id: str) -> None:
+    r = get_redis()
+    await r.delete(_pages_key(session_id))

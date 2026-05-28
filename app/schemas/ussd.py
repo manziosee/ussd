@@ -43,3 +43,23 @@ class InteractionOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class MarketPriceIn(BaseModel):
+    district: str = Field(..., description="District key: kigali | musanze | huye | rubavu | kayonza")
+    crop: str = Field(..., description="Crop name, e.g. 'Maize'")
+    unit: str = Field(default="kg", description="Unit, e.g. 'kg' or 'bunch'")
+    price_rwf: int = Field(..., gt=0, description="Price in Rwandan Francs")
+    updated_by: str | None = Field(default=None, description="Admin identifier (optional)")
+
+
+class MarketPriceOut(BaseModel):
+    id: int
+    district: str
+    crop: str
+    unit: str
+    price_rwf: int
+    updated_by: str | None
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}

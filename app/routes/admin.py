@@ -13,16 +13,18 @@ import logging
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import HTMLResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import require_admin_key
 from ..database import get_db
+from ..models.feedback import Feedback
 from ..models.interaction import Interaction
+from ..models.market_price import MarketPrice
 from ..models.user import User
-from ..schemas.ussd import AdminStats, InteractionOut
+from ..schemas.ussd import AdminStats, InteractionOut, MarketPriceIn, MarketPriceOut
 
 log = logging.getLogger(__name__)
 
@@ -113,6 +115,126 @@ async def list_users(
         }
         for u in rows
     ]
+
+
+# ── Market prices ─────────────────────────────────────────────────────────────
+
+@router.get(
+    "/market-prices",
+    response_model=list[MarketPriceOut],
+    summary="List crop market prices",
+)
+async def list_market_prices(
+    district: str | None = Query(default=None, description="Filter by district"),
+    crop:     str | None = Query(default=None, description="Filter by crop name (case-insensitive)"),
+    db: AsyncSession = Depends(get_db),
+) -> list[MarketPriceOut]:
+    q = select(MarketPrice).order_by(MarketPrice.district, MarketPrice.crop)
+    if district:
+        q = q.where(MarketPrice.district == district.lower())
+    if crop:
+        q = q.where(MarketPrice.crop.ilike(f"%{crop}%"))
+    rows = (await db.execute(q)).scalars().all()
+    return list(rows)
+
+
+@router.put(
+    "/market-prices",
+    response_model=MarketPriceOut,
+    summary="Create or update a crop price (upsert by district + crop)",
+)
+async def upsert_market_price(
+    data: MarketPriceIn = Body(...),
+    db: AsyncSession = Depends(get_db),
+) -> MarketPriceOut:
+    """
+    Upsert a market price for a specific district + crop combination.
+    If a row already exists, its price/unit/updated_by are updated.
+    """
+    result = await db.execute(
+        select(MarketPrice).where(
+            MarketPrice.district == data.district.lower(),
+            MarketPrice.crop == data.crop,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row:
+        await db.execute(
+            update(MarketPrice)
+            .where(MarketPrice.id == row.id)
+            .values(
+                price_rwf=data.price_rwf,
+                unit=data.unit,
+                updated_by=data.updated_by,
+                updated_at=func.now(),
+            )
+        )
+        await db.commit()
+        await db.refresh(row)
+        return row
+    new_row = MarketPrice(
+        district=data.district.lower(),
+        crop=data.crop,
+        unit=data.unit,
+        price_rwf=data.price_rwf,
+        updated_by=data.updated_by,
+    )
+    db.add(new_row)
+    await db.commit()
+    await db.refresh(new_row)
+    return new_row
+
+
+@router.delete(
+    "/market-prices/{price_id}",
+    summary="Delete a market price entry",
+)
+async def delete_market_price(
+    price_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    result = await db.execute(select(MarketPrice).where(MarketPrice.id == price_id))
+    row = result.scalar_one_or_none()
+    if not row:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Price not found")
+    await db.delete(row)
+    await db.commit()
+    return {"deleted": price_id}
+
+
+# ── Feedback ───────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/feedback",
+    summary="Feedback aggregate — helpful vs not-helpful counts per category",
+)
+async def get_feedback(
+    category: str | None = Query(default=None, description="Filter by category"),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    q = select(Feedback.category, Feedback.rating, func.count(Feedback.id).label("cnt"))
+    if category:
+        q = q.where(Feedback.category == category)
+    rows = (await db.execute(q.group_by(Feedback.category, Feedback.rating))).all()
+
+    result: dict[str, dict] = {}
+    for r in rows:
+        if r.category not in result:
+            result[r.category] = {"helpful": 0, "not_helpful": 0, "total": 0}
+        if r.rating == 1:
+            result[r.category]["helpful"] = r.cnt
+        elif r.rating == -1:
+            result[r.category]["not_helpful"] = r.cnt
+        result[r.category]["total"] += r.cnt
+
+    # Add satisfaction % for each category
+    for cat in result:
+        total = result[cat]["total"]
+        result[cat]["satisfaction_pct"] = (
+            round(result[cat]["helpful"] / total * 100, 1) if total else 0.0
+        )
+    return result
 
 
 # ── HTML Dashboard ─────────────────────────────────────────────────────────────

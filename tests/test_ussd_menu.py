@@ -246,6 +246,87 @@ async def test_rate_limit_blocks(mock_db, mock_redis):
     assert "limit" in r.lower()
 
 
+# ── New high-impact features ──────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_health_menu_has_emergency_option(mock_db):
+    """Health submenu must include option 7 for emergency numbers."""
+    r = await ussd("3", mock_db)
+    assert is_con(r)
+    assert "7.Emergency" in r
+
+
+@pytest.mark.asyncio
+async def test_health_emergency_shows_numbers(mock_db):
+    """Option 7 in health menu returns static emergency numbers."""
+    r = await ussd("3*7", mock_db)
+    assert is_end(r)
+    assert "112" in r
+
+
+@pytest.mark.asyncio
+async def test_farming_market_prices_shows_district_menu(mock_db):
+    """Farming option 4 (Market prices) must show district selection, not AI."""
+    r = await ussd("2*4", mock_db)
+    assert is_con(r)
+    assert "district" in r.lower() or "Kigali" in r
+
+
+@pytest.mark.asyncio
+async def test_tip_has_send_sms_option(mock_db, mock_ai):
+    """After a predefined tip, option 3 must be 'Send SMS'."""
+    r = await ussd("1*1", mock_db)
+    assert is_con(r)
+    assert "3.Send SMS" in r
+
+
+@pytest.mark.asyncio
+async def test_tip_has_feedback_options(mock_db, mock_ai):
+    """After a predefined tip, helpful/not helpful options must be present."""
+    r = await ussd("2*1", mock_db)
+    assert is_con(r)
+    assert "4.Helpful" in r
+    assert "5.Not helpful" in r
+
+
+@pytest.mark.asyncio
+async def test_feedback_helpful_returns_thanks(mock_db, mock_ai):
+    """Pressing 4 (Helpful) after a tip should return a thank-you END response."""
+    r = await ussd("1*1*4", mock_db)
+    assert is_end(r)
+    assert "thanks" in r.lower() or "urakoze" in r.lower()
+
+
+@pytest.mark.asyncio
+async def test_feedback_not_helpful_returns_thanks(mock_db, mock_ai):
+    """Pressing 5 (Not helpful) should also return a thank-you END response."""
+    r = await ussd("1*2*5", mock_db)
+    assert is_end(r)
+    assert "thanks" in r.lower() or "urakoze" in r.lower()
+
+
+@pytest.mark.asyncio
+async def test_pagination_splits_long_response(mock_db):
+    """A free-form AI response where SMS fails should trigger CON pagination."""
+    from unittest.mock import patch
+    from app.services.ai_service import AIResult
+
+    long_text = ("A word " * 50).strip()  # ~350 chars, well over _PAGE_SIZE=160
+    with patch(
+        "app.services.menu_service.ai_service.get_ai_response",
+        new_callable=AsyncMock,
+        return_value=AIResult(text=long_text, tokens_used=80, from_cache=False),
+    ), patch(
+        "app.services.menu_service.sms_service.send_sms",
+        new_callable=AsyncMock,
+        return_value=False,  # SMS fails → fallback to pagination
+    ):
+        r = await ussd("5*What is a long answer?", mock_db)
+    assert is_con(r), f"Expected CON for paginated response, got: {r[:80]}"
+    assert "1.Next" in r
+    assert "0.Stop" in r
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 from unittest.mock import AsyncMock  # noqa: E402 — needed by fixtures above
