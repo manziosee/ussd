@@ -39,13 +39,32 @@ def mock_redis(monkeypatch):
 
 @pytest.fixture
 def mock_db():
-    """Lightweight AsyncSession mock that satisfies SQLAlchemy execute() calls."""
+    """Lightweight AsyncSession mock — returns a pre-built, onboarded user."""
+    user_mock = MagicMock()
+    user_mock.name = None
+    user_mock.profession = None
+    user_mock.language = "en"
+    user_mock.sms_opt_out = False
+    user_mock.daily_tips_enabled = False
+    user_mock.daily_tip_category = None
+    user_mock.onboarded = True
+    user_mock.total_queries = 0
+    user_mock.created_at = None
+    user_mock.updated_at = None
+
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none = MagicMock(return_value=user_mock)
+    result_mock.scalars = MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+    result_mock.all = MagicMock(return_value=[])
+    result_mock.scalar_one = MagicMock(return_value=0)
+
     db = AsyncMock()
-    # scalar_one_or_none returns None by default → triggers user creation path
-    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None)))
+    db.execute = AsyncMock(return_value=result_mock)
     db.add = MagicMock()
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
+    db.flush = AsyncMock()
+    db.delete = AsyncMock()
     return db
 
 

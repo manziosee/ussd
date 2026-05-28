@@ -1,33 +1,32 @@
 """
-Claude AI service — generates concise, USSD-friendly responses.
+Groq AI service — generates concise, USSD-friendly responses via Llama models.
 
 Cost optimisations applied
 ──────────────────────────
-1. Anthropic prompt caching (cache_control: ephemeral) — system prompts are
-   cached server-side after first use; subsequent calls save ~90% input tokens.
-2. Redis response caching — same (category, question) pair is answered once
+1. Redis response caching — same (category, question) pair is answered once
    per AI_CACHE_TTL (default 24 h); zero API cost on cache hits.
-3. claude-haiku-4-5-20251001 — cheapest and fastest model; ideal for USSD latency.
-4. Hard token ceiling (MAX_AI_TOKENS=150) prevents runaway costs.
+2. llama-3.1-8b-instant — Groq's fastest model; ideal for USSD latency.
+3. Hard token ceiling (MAX_AI_TOKENS=150) keeps responses short and cheap.
+4. 3-attempt retry with back-off for transient network/API errors.
 
 Personalisation
 ───────────────
 When a user has set their profession (farmer / student / business owner / other)
 via the Account menu, it is injected as extra context into the system prompt.
-This costs zero extra tokens because it replaces a placeholder in the cached prompt.
 
 Language support
 ────────────────
 When a user has selected Kinyarwanda (language="rw") in the Account menu,
-an instruction is appended to the system prompt so Claude responds in
+an instruction is appended to the system prompt so the model responds in
 Kinyarwanda (Ikinyarwanda).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import NamedTuple
 
-import anthropic
+from groq import AsyncGroq, APIConnectionError, APITimeoutError, InternalServerError
 
 from ..config import get_settings
 from . import session_service
@@ -35,7 +34,7 @@ from . import session_service
 log = logging.getLogger(__name__)
 settings = get_settings()
 
-# ── System prompts (cached by Anthropic after first use) ─────────────────────
+# ── System prompts ────────────────────────────────────────────────────────────
 
 _RULES = """
 OUTPUT RULES — follow strictly:
@@ -90,13 +89,17 @@ SYSTEM_PROMPTS: dict[str, str] = {
     ),
 }
 
-
 # ── Result type ───────────────────────────────────────────────────────────────
 
 class AIResult(NamedTuple):
     text: str
     tokens_used: int
     from_cache: bool
+
+
+# ── Retry config ──────────────────────────────────────────────────────────────
+
+_RETRY_DELAYS = (0.3, 0.8)  # seconds between attempts 1→2 and 2→3
 
 
 # ── Main function ─────────────────────────────────────────────────────────────
@@ -109,10 +112,10 @@ async def get_ai_response(
     language: str = "en",
 ) -> AIResult:
     """
-    Return an AI response for a USSD user.
+    Return an AI response for a USSD user via Groq (Llama).
 
     1. Checks Redis cache (category + question as key).
-    2. On miss, calls Claude Haiku with prompt caching enabled.
+    2. On miss, calls Groq with up to 3 attempts on transient errors.
     3. Stores the result in Redis for AI_CACHE_TTL seconds.
 
     Args:
@@ -122,7 +125,7 @@ async def get_ai_response(
         user_profession — injected into system prompt for personalisation (optional)
         language        — "en" (default) or "rw" (Kinyarwanda); controls reply language
 
-    Raises on API/network errors — callers must catch.
+    Raises on non-retriable API errors — callers must catch.
     """
     # 1. Redis cache hit → free
     cached = await session_service.get_cached_ai_response(category, question)
@@ -139,32 +142,41 @@ async def get_ai_response(
     if language == "rw":
         system_text += _LANGUAGE_HINT
 
-    # 3. Call Claude Haiku
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    # 3. Call Groq with retry on transient errors
+    client = AsyncGroq(api_key=settings.groq_api_key)
+    last_exc: Exception | None = None
 
-    message = await client.messages.create(
-        model=settings.claude_model,
-        max_tokens=settings.max_ai_tokens,
-        system=[
-            {
-                "type": "text",
-                "text": system_text,
-                # Anthropic caches the system prompt after the first request;
-                # all subsequent calls with the same prompt save ~90% input tokens.
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=[{"role": "user", "content": question}],
-    )
+    for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
+        try:
+            completion = await client.chat.completions.create(
+                model=settings.groq_model,
+                max_tokens=settings.max_ai_tokens,
+                messages=[
+                    {"role": "system", "content": system_text},
+                    {"role": "user",   "content": question},
+                ],
+            )
+            break
+        except (APIConnectionError, APITimeoutError, InternalServerError) as exc:
+            last_exc = exc
+            if delay is None:
+                raise
+            log.warning(
+                "Groq call failed (attempt %d): %s — retrying in %.1fs",
+                attempt + 1, exc, delay,
+            )
+            await asyncio.sleep(delay)
+    else:
+        raise last_exc  # type: ignore[misc]
 
-    response_text = message.content[0].text.strip()
-    tokens        = message.usage.input_tokens + message.usage.output_tokens
+    response_text = completion.choices[0].message.content.strip()
+    tokens        = completion.usage.prompt_tokens + completion.usage.completion_tokens
 
     # 4. Save to Redis cache
     await session_service.cache_ai_response(category, question, response_text)
 
     log.info(
-        "AI call [%s] %d tokens | lang=%s | phone=%s | q=%s",
+        "Groq call [%s] %d tokens | lang=%s | phone=%s | q=%s",
         category, tokens, language, phone_number, question[:60],
     )
     return AIResult(text=response_text, tokens_used=tokens, from_cache=False)

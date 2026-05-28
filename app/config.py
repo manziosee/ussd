@@ -20,9 +20,9 @@ class Settings(BaseSettings):
     session_ttl: int = 300      # 5 min — USSD timeout
     ai_cache_ttl: int = 86400   # 24 h — cache repeated AI answers
 
-    # ── Anthropic / Claude ────────────────────────────────────────────────────
-    anthropic_api_key: str = ""
-    claude_model: str = "claude-haiku-4-5-20251001"
+    # ── Groq ──────────────────────────────────────────────────────────────────
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.1-8b-instant"
     max_ai_tokens: int = 150
 
     # ── Africa's Talking ──────────────────────────────────────────────────────

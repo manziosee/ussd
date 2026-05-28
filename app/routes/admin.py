@@ -185,6 +185,51 @@ async def upsert_market_price(
     return new_row
 
 
+@router.post(
+    "/market-prices/bulk",
+    response_model=list[MarketPriceOut],
+    summary="Bulk upsert market prices (create or update multiple at once)",
+    status_code=200,
+)
+async def bulk_upsert_market_prices(
+    data: list[MarketPriceIn] = Body(...),
+    db: AsyncSession = Depends(get_db),
+) -> list[MarketPriceOut]:
+    """Upsert a list of market prices in a single request. Idempotent."""
+    results: list[MarketPrice] = []
+    for item in data:
+        result = await db.execute(
+            select(MarketPrice).where(
+                MarketPrice.district == item.district.lower(),
+                MarketPrice.crop == item.crop,
+            )
+        )
+        row = result.scalar_one_or_none()
+        if row:
+            await db.execute(
+                update(MarketPrice)
+                .where(MarketPrice.id == row.id)
+                .values(price_rwf=item.price_rwf, unit=item.unit,
+                        updated_by=item.updated_by, updated_at=func.now())
+            )
+            results.append(row)
+        else:
+            new_row = MarketPrice(
+                district=item.district.lower(),
+                crop=item.crop,
+                unit=item.unit,
+                price_rwf=item.price_rwf,
+                updated_by=item.updated_by,
+            )
+            db.add(new_row)
+            await db.flush()
+            results.append(new_row)
+    await db.commit()
+    for r in results:
+        await db.refresh(r)
+    return results
+
+
 @router.delete(
     "/market-prices/{price_id}",
     summary="Delete a market price entry",

@@ -24,6 +24,12 @@ class User(Base):
         comment="When True, skip sending full-answer SMS even if response exceeds char limit",
     )
 
+    # Onboarding
+    onboarded = Column(
+        Boolean, default=False, nullable=False, server_default="false",
+        comment="True once user completes initial language+profession setup",
+    )
+
     # Daily tip subscription
     daily_tips_enabled = Column(
         Boolean, default=False, nullable=False, server_default="false",

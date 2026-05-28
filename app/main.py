@@ -43,8 +43,8 @@ def _validate_env() -> None:
     """Warn about missing secrets; only hard-fail on keys needed at startup."""
     warnings: list[str] = []
 
-    if not settings.anthropic_api_key:
-        warnings.append("  • ANTHROPIC_API_KEY not set — AI responses will fail (menu navigation still works)")
+    if not settings.groq_api_key:
+        warnings.append("  • GROQ_API_KEY not set — AI responses will fail (menu navigation still works)")
     if not settings.at_api_key or settings.at_api_key == "your_api_key":
         warnings.append("  • AT_API_KEY not set — SMS sending disabled")
     if settings.secret_key == "change-this-in-production" and not settings.debug:

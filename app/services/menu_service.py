@@ -354,6 +354,10 @@ async def process_ussd(
     if clean == "__TOO_LONG__":
         return f"END {_t('too_long', language)}"
 
+    # ── First-time onboarding: new users choose language then profession ───────
+    if not prefs.get("onboarded", True):
+        return await _handle_onboarding(inputs, phone_number, db)
+
     # ── Pagination: active if we stashed pages for a previous response ─────────
     if inputs and await session_service.has_pending_pages(session_id):
         last_seg = inputs[-1]
@@ -432,6 +436,63 @@ async def process_ussd(
         await session_service.clear_resume_position(phone_number)
 
     return response
+
+
+# ── First-time onboarding ─────────────────────────────────────────────────────
+
+async def _handle_onboarding(
+    inputs: list[str],
+    phone_number: str,
+    db: AsyncSession,
+) -> str:
+    """
+    Two-step setup for new users: language → profession → MAIN_MENU.
+
+    inputs=[]      → language choice
+    inputs=["1"]   → English selected, show profession menu
+    inputs=["2"]   → Kinyarwanda selected, show profession menu (in Kinyarwanda)
+    inputs=["X","Y"] → save language + profession, mark onboarded, return main menu
+    """
+    _LANG_MENU = (
+        "CON Welcome to SmartAssist!\n"
+        "Choose language:\n"
+        "1.English\n"
+        "2.Kinyarwanda"
+    )
+    _PROF_EN = (
+        "CON Your role:\n"
+        "1.Farmer\n"
+        "2.Student\n"
+        "3.Business owner\n"
+        "4.Other"
+    )
+    _PROF_RW = (
+        "CON Urimo iki:\n"
+        "1.Umuhinzi\n"
+        "2.Umunyeshuri\n"
+        "3.Ubucuruzi\n"
+        "4.Ikindi"
+    )
+
+    if not inputs:
+        return _LANG_MENU
+
+    lang_map = {"1": "en", "2": "rw"}
+    lang = lang_map.get(inputs[0])
+    if not lang:
+        return _LANG_MENU
+
+    if len(inputs) == 1:
+        return _PROF_RW if lang == "rw" else _PROF_EN
+
+    prof_map = {"1": "farmer", "2": "student", "3": "business owner", "4": "other"}
+    profession = prof_map.get(inputs[1])
+    if not profession:
+        return _PROF_RW if lang == "rw" else _PROF_EN
+
+    await _update_user(phone_number, {"language": lang, "profession": profession, "onboarded": True}, db)
+    await session_service.clear_profile_cache(phone_number)
+    return MAIN_MENU
 
 
 # ── Category handler ───────────────────────────────────────────────────────────
@@ -1106,7 +1167,7 @@ async def _update_user(phone_number: str, fields: dict, db: AsyncSession) -> Non
 async def _get_cached_user_prefs(phone_number: str, db: AsyncSession) -> dict:
     """Return cached user prefs. Invalidates stale entries missing required keys."""
     profile = await session_service.get_cached_profile(phone_number)
-    if profile and {"profession", "language", "sms_opt_out"}.issubset(profile):
+    if profile and {"profession", "language", "sms_opt_out", "onboarded"}.issubset(profile):
         return profile
     user  = await _get_user(phone_number, db)
     prefs = {
@@ -1116,6 +1177,8 @@ async def _get_cached_user_prefs(phone_number: str, db: AsyncSession) -> dict:
         "sms_opt_out":        bool(user.sms_opt_out),
         "daily_tips_enabled": bool(user.daily_tips_enabled),
         "daily_tip_category": user.daily_tip_category,
+        # Default True so existing cached profiles without this key pass through
+        "onboarded":          bool(getattr(user, "onboarded", True)),
     }
     await session_service.cache_profile(phone_number, prefs)
     return prefs
