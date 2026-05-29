@@ -48,10 +48,13 @@ _LABELS: dict[str, dict[str, str]] = {
     },
 }
 
-_FOOTERS: dict[str, str] = {
-    "en": "Dial *384*72275# for more AI tips.",
-    "rw": "Vugisha *384*72275# kubona inama nyinshi.",
-}
+def _footers() -> dict[str, str]:
+    from ..config import get_settings
+    code = get_settings().ussd_shortcode
+    return {
+        "en": f"Dial {code} for more AI tips.",
+        "rw": f"Vugisha {code} kubona inama nyinshi.",
+    }
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -70,7 +73,7 @@ def _profession_to_category(profession: str | None) -> str | None:
 def _format_tip_sms(category: str, tip: str, language: str) -> str:
     lang_labels = _LABELS.get(language, _LABELS["en"])
     label  = lang_labels.get(category, "SmartAssist Tip")
-    footer = _FOOTERS.get(language, _FOOTERS["en"])
+    footer = _footers().get(language, _footers()["en"])
     return f"SmartAssist - {label}\n\n{tip}\n\n{footer}"
 
 

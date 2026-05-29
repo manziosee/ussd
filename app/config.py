@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # ── SMS Gateway (Jasmin-backed microservice) ──────────────────────────────
     sms_gateway_url: str = "http://sms-gateway:8001"
 
+    # ── USSD shortcode (operator-specific — set this to your own shortcode) ──
+    ussd_shortcode: str = "*123#"
+
     # ── Admin API ─────────────────────────────────────────────────────────────
     # Sent as  X-Admin-Key: <value>  header on every /admin/* request.
     admin_api_key: str = ""

@@ -70,5 +70,5 @@ def format_sms_response(category: str, question: str, answer: str) -> str:
         f"SmartAssist - {label}\n\n"
         f"Q: {question[:100]}\n\n"
         f"A: {answer}\n\n"
-        "Dial *384*72275# for more tips."
+        f"Dial {settings.ussd_shortcode} for more tips."
     )

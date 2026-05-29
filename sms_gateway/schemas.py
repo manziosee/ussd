@@ -10,7 +10,7 @@ class SMSRequest(BaseModel):
     to: str = Field(..., description="Destination phone number in E.164 format (+250788000001)")
     message: str = Field(..., min_length=1, max_length=1600, description="Message text")
     sender_id: str | None = Field(default=None, description="Sender ID override (alphanumeric, ≤11 chars)")
-    country: str | None = Field(default=None, description="ISO 3166-1 alpha-2 country code (e.g. 'rw'). Auto-detected from phone number if omitted.")
+    country: str | None = Field(default=None, description="ISO 3166-1 alpha-2 country code (e.g. 'ke', 'ng', 'in'). Auto-detected from phone number if omitted.")
 
     @field_validator("to")
     @classmethod

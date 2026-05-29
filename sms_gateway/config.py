@@ -20,14 +20,12 @@ class Settings(BaseSettings):
     # ── Sender identity ───────────────────────────────────────────────────────
     default_sender_id: str = "SmartAssist"
 
-    # ── Connector routing (JSON dict: country_code → Jasmin connector CID) ───
-    # Example: '{"250":"mtn_rw","254":"safaricom_ke","256":"mtn_ug"}'
-    # When a country has no entry, Jasmin's own routing table decides.
-    connector_map_json: str = (
-        '{"250":"mtn_rw","254":"safaricom_ke","256":"mtn_ug",'
-        '"255":"vodacom_tz","233":"mtn_gh","234":"mtn_ng",'
-        '"27":"mtn_za","243":"airtel_cd","226":"orange_bf"}'
-    )
+    # ── Connector routing (JSON dict: dialing_prefix → Jasmin connector CID) ──
+    # Default is EMPTY — Jasmin's own MT routing table handles dispatch globally.
+    # Add entries only to override routing for specific country prefixes.
+    # Connector names should be ISO 3166-1 alpha-2 country codes (rw, ke, ng …).
+    # Example: '{"250":"rw","254":"ke","1":"us"}'
+    connector_map_json: str = "{}"
 
     model_config = {
         "env_prefix": "SMS_GW_",
