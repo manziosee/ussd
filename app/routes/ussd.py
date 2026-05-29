@@ -59,7 +59,7 @@ def _verify_at_signature(body: bytes, received_hash: str | None) -> bool:
     if not settings.at_api_key:
         return True                                   # no key → skip (dev)
     if not received_hash:
-        return settings.at_environment == "sandbox"   # absent = OK in sandbox
+        return not settings.at_api_key   # no key configured → skip check (dev/sandbox)
 
     expected = hmac.new(
         key=settings.at_api_key.encode(),

@@ -3,8 +3,9 @@
 > **AI for everyone — including the 600 million Africans with no internet.**
 
 SmartAssist is an AI-powered USSD assistant that lets any mobile phone user
-(feature phone or smartphone, with or without internet) access a Claude-powered
-AI by simply dialling a shortcode like `*123#`.
+(feature phone or smartphone, no internet required) access AI by simply dialling
+a shortcode like `*123#`.  Responses are instant and cost the user nothing extra
+beyond their normal USSD session.
 
 ---
 
@@ -13,180 +14,133 @@ AI by simply dialling a shortcode like `*123#`.
 | | Technology | Role |
 |---|---|---|
 | ![Python](https://img.shields.io/badge/Python_3.12-3776AB?style=flat&logo=python&logoColor=white) | **Python 3.12** | Core language |
-| ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat&logo=fastapi&logoColor=white) | **FastAPI** | Async API framework |
-| ![Anthropic](https://img.shields.io/badge/Claude_Haiku-D4A017?style=flat&logoColor=white) | **Claude Haiku** | AI responses (Anthropic) |
+| ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat&logo=fastapi&logoColor=white) | **FastAPI** | Async API framework (USSD app + SMS gateway) |
+| ![Groq](https://img.shields.io/badge/Groq_Llama-FF6B35?style=flat&logoColor=white) | **Groq — Llama 3.1 8B** | Ultra-fast AI responses via Groq inference |
 | ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=flat&logo=postgresql&logoColor=white) | **PostgreSQL (Neon)** | Cloud-hosted serverless DB |
-| ![Redis](https://img.shields.io/badge/Redis-DC382D?style=flat&logo=redis&logoColor=white) | **Redis / fakeredis** | Sessions, AI cache, rate limits |
-| ![Africa's Talking](https://img.shields.io/badge/Africa's_Talking-00A859?style=flat&logoColor=white) | **Africa's Talking** | USSD gateway + SMS delivery |
-| ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white) | **Docker Compose** | Optional local DB + Redis |
+| ![Redis](https://img.shields.io/badge/Redis-DC382D?style=flat&logo=redis&logoColor=white) | **Redis** | Sessions, AI cache, rate limits |
+| ![Jasmin](https://img.shields.io/badge/Jasmin_SMPP-2C3E50?style=flat&logoColor=white) | **Jasmin SMS Gateway** | Open-source SMPP gateway — own SMS infrastructure |
+| ![RabbitMQ](https://img.shields.io/badge/RabbitMQ-FF6600?style=flat&logo=rabbitmq&logoColor=white) | **RabbitMQ** | Jasmin message queue (AMQP) |
+| ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white) | **Docker Compose** | Full-stack local deployment |
 | ![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy_2.0-D71F00?style=flat&logoColor=white) | **SQLAlchemy 2.0** | Async ORM |
 | ![Alembic](https://img.shields.io/badge/Alembic-grey?style=flat) | **Alembic** | Database migrations |
-| ![pytest](https://img.shields.io/badge/pytest-0A9EDC?style=flat&logo=pytest&logoColor=white) | **pytest-asyncio** | Async test suite |
+| ![pytest](https://img.shields.io/badge/pytest-0A9EDC?style=flat&logo=pytest&logoColor=white) | **pytest-asyncio** | 45-test async suite |
 
 ---
 
-## What the System Does
-
-Any mobile phone dials `*123#`. No internet. No smartphone. No app download.
-The user navigates a simple text menu powered by Claude AI.
+## System Architecture
 
 ```
-Any mobile phone dials *123#
+Any mobile phone dials *123#  (no internet — works on any feature phone)
           │
-          │  No internet required — works on any feature phone
           ▼
 ┌─────────────────────────────────┐
-│    Africa's Talking Gateway     │
-│      (USSD network layer)       │
+│       USSD Aggregator           │
+│  (Africa's Talking or any       │
+│   USSD network partner)         │
 └────────────────┬────────────────┘
                  │  POST /ussd  (form-encoded)
                  │  sessionId · phoneNumber · text
                  ▼
-┌────────────────────────────────────────────────────────────────┐
-│                      FastAPI Backend                           │
-│                                                                │
-│  ┌──────────────────────────────────────────────────────────┐ │
-│  │                  USSD State Machine                      │ │
-│  │  Parses accumulated text  e.g. "1*2" = Business → Tip 2 │ │
-│  │  Routes to correct handler based on input depth          │ │
-│  └────────────────────────┬─────────────────────────────────┘ │
-│           ┌───────────────┼────────────────┐                  │
-│           ▼               ▼                ▼                  │
-│  ┌──────────────┐ ┌───────────────┐ ┌───────────────┐        │
-│  │    Redis     │ │ Claude Haiku  │ │  PostgreSQL   │        │
-│  │  (fakeredis  │ │  (Anthropic)  │ │   on Neon     │        │
-│  │   in dev)    │ │               │ │               │        │
-│  │ · Sessions   │ │ · Business    │ │ · Users       │        │
-│  │ · AI cache   │ │ · Farming     │ │ · Interaction │        │
-│  │ · Rate limit │ │ · Health      │ │   history     │        │
-│  │ · Knowledge  │ │ · Education   │ │ · Analytics   │        │
-│  │   seed cache │ │ · General     │ │               │        │
-│  └──────────────┘ └───────────────┘ └───────────────┘        │
-└───────────────────────────┬────────────────────────────────────┘
-                            │  "CON …" (continue) / "END …" (end)
-                            ▼
-                   Africa's Talking
-                   delivers to phone ──→ SMS fallback (long answers)
-                            │
-                            ▼
-                     User's Phone
-                  ┌─────────────────┐
-                  │ SmartAssist AI  │
-                  │ 1.Business      │
-                  │ 2.Farming       │
-                  │ 3.Health        │
-                  │ 4.Education     │
-                  │ 5.Ask AI        │
-                  │ 6.Account       │
-                  └─────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                 SmartAssist USSD App  (port 8000)               │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │                  USSD State Machine                        │ │
+│  │  Parses accumulated text  e.g. "1*2" = Business → Tip 2  │ │
+│  └──────────────────────┬─────────────────────────────────────┘ │
+│           ┌─────────────┼────────────┐                          │
+│           ▼             ▼            ▼                          │
+│  ┌──────────────┐ ┌──────────┐ ┌───────────────┐              │
+│  │    Redis     │ │  Groq    │ │  PostgreSQL   │              │
+│  │  Sessions    │ │  Llama   │ │   (Neon)      │              │
+│  │  AI cache    │ │  3.1 8B  │ │  Users        │              │
+│  │  Rate limit  │ │  ~50ms   │ │  Interactions │              │
+│  └──────────────┘ └──────────┘ └───────────────┘              │
+│                                                                  │
+│  Long answer → POST /sms/send                                   │
+└───────────────────────┬──────────────────────────────────────────┘
+                        │
+                        ▼
+┌───────────────────────────────────────────────────────────────────┐
+│              SMS Gateway API  (port 8001)                         │
+│                                                                    │
+│  • Validates E.164 phone number                                    │
+│  • Detects country code (+250 → Rwanda, +254 → Kenya …)           │
+│  • Routes to correct Jasmin connector (mtn_rw, safaricom_ke …)    │
+│  • Auto-detects GSM7 vs UCS-2 encoding (Kinyarwanda support)      │
+└───────────────────────┬───────────────────────────────────────────┘
+                        │  POST /send  (form-encoded)
+                        ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                  Jasmin SMPP Gateway  (port 1401/2775)            │
+│                                                                    │
+│  Configured SMPP connectors:                                       │
+│    mtn_rw       →  MTN Rwanda      (SMPP)                         │
+│    airtel_rw    →  Airtel Rwanda   (SMPP)                         │
+│    safaricom_ke →  Safaricom Kenya (SMPP)                         │
+│    mtn_ug       →  MTN Uganda      (SMPP)                         │
+│    …add more via  telnet localhost 8990  (Jasmin CLI)             │
+└───────────────────────┬───────────────────────────────────────────┘
+                        │  SMPP v3.4
+                        ▼
+              Telecom Operator Network
+                        │
+                        ▼
+                  User's Phone 📱
 ```
 
 ---
 
-## Request Flow
+## Why Jasmin Instead of Twilio / Africa's Talking SMS?
 
-```
- User Input              System                          External
- ──────────              ──────                          ────────
+| | Twilio / AT SMS | Jasmin SMPP |
+|---|---|---|
+| **Cost per SMS** | $0.0075–$0.02 | ~$0 (direct telecom rate) |
+| **Infrastructure** | Third-party cloud | Your own server |
+| **Latency** | 1–5 s (cloud relay) | < 500 ms (direct SMPP) |
+| **Multi-country** | Per-provider setup | One gateway, all operators |
+| **Data sovereignty** | Vendor's servers | Your servers |
+| **Scaling** | Per-message billing | Fixed infra cost |
 
- Dials *123#
-      │
-      │── POST /ussd ──────────────▶ FastAPI
-                                         │
-                                         ├─ user_exists in Redis?
-                                         │    Yes → skip DB lookup
-                                         │    No  → INSERT user row
-                                         │
-                                         ├─ Rate limit check
-                                         │    Redis INCR per phone/hour
-                                         │    Blocked at 50 req/hr
-                                         │
-                                         ├─ Parse "text" input
-                                         │    ""      → main menu (CON)
-                                         │    "1"     → business menu (CON)
-                                         │    "1*2"   → bookkeeping tip
-                                         │    "1*5*Q" → free AI question
-                                         │
-                                         ├─ Check Redis AI cache
-                                         │    HIT  → return cached (free)
-                                         │    MISS → Claude Haiku API
-                                         │            system prompt cached
-                                         │            response saved to Redis
-                                         │
-                                         ├─ Response > 155 chars?
-                                         │    Yes → SMS via Africa's Talking
-                                         │          show truncated on USSD
-                                         │
-                                         └─ Log to PostgreSQL (background)
-
- CON / END ◀──────────── Plain text ─────┘
- shown on phone
-```
+At 10 000 SMS/month, Jasmin pays for itself in the first month.
 
 ---
 
 ## Menu Structure
 
 ```
-*123#
+Dial *123# → Onboarding (new users: language + role) → Main Menu
 └── SmartAssist AI
     ├── 1. Business
-    │   ├── 1. Pricing tips      →  AI (knowledge cache first)
-    │   ├── 2. Bookkeeping       →  AI (knowledge cache first)
-    │   ├── 3. Marketing         →  AI (knowledge cache first)
-    │   ├── 4. Get customers     →  AI (knowledge cache first)
-    │   ├── 5. My question       →  CON: "Your question:" → AI answer
-    │   └── 0. Main menu
+    │   ├── 1–4. Pricing / Bookkeeping / Marketing / Get customers  (AI tip → CON)
+    │   │         └── 1.More tips · 2.More detail · 3.Send SMS · 4.Helpful · 5.Not helpful · 0.Back
+    │   ├── 5. My question  (free AI question, paginated if long)
+    │   └── 6. Calculator   (profit check · loan payment — zero AI cost)
     │
-    ├── 2. Farming   (Soil · Pest control · Best crops · Market prices · My question)
-    ├── 3. Health    (Nutrition · Hygiene · Maternal health · Child health · My question)
-    ├── 4. Education (Study tips · Career guide · Math help · English tips · My question)
+    ├── 2. Farming
+    │   ├── 1–3. Soil / Pest control / Best crops  (AI tip)
+    │   ├── 4. Market prices  (DB-backed — 5 Rwanda districts × 6 crops)
+    │   ├── 5. My question
+    │   └── 6. Nearby agri offices  (static directory)
     │
-    ├── 5. Ask AI
-    │   └── CON: "Ask AI anything:" → free question → AI answer
+    ├── 3. Health
+    │   ├── 1–4. Nutrition / Hygiene / Maternal / Child  (AI tip)
+    │   ├── 5. My question
+    │   ├── 6. Nearby clinics  (static directory)
+    │   └── 7. Emergency numbers  (police 112 · ambulance 912 · fire 110)
+    │
+    ├── 4. Education
+    │   ├── 1–4. Study / Career / Math / English  (AI tip)
+    │   ├── 5. My question
+    │   └── 6. Nearby schools  (static directory)
+    │
+    ├── 5. Ask AI  (free-form question, paginated CON for long answers)
     │
     └── 6. Account
-        ├── 1. My stats       →  query count · name · role · member since
-        ├── 2. Set my name    →  CON: "Enter your name:" → saved to DB
-        ├── 3. Set profession →  Farmer / Student / Business / Other
+        ├── 1. My stats    · 2. Set name  · 3. Set profession
+        ├── 4. Language    · 5. SMS alerts · 6. Daily tips
         └── 0. Main menu
 ```
-
----
-
-## Features
-
-### ✅ Phase 1 — MVP (complete)
-
-| Feature | Detail |
-|---|---|
-| **USSD menu navigation** | 5 categories + account, unlimited depth via state machine |
-| **AI responses** | Claude Haiku — Africa-focused, under 155 chars |
-| **Anthropic prompt caching** | System prompts cached server-side → ~90% token savings |
-| **Redis response cache** | Same answer cached 24 h → zero API cost on repeat questions |
-| **Offline knowledge seed** | 16 pre-written responses loaded at startup → zero latency & zero cost for all pre-defined topics |
-| **SMS fallback** | Long answers auto-sent via Africa's Talking SMS |
-| **User profiles** | Name + profession stored; AI personalises tips based on profession |
-| **Rate limiting** | 50 queries / phone / hour via Redis counter |
-| **Session management** | Redis-backed, 5-min TTL (USSD standard) |
-| **fakeredis fallback** | Server runs without Redis in dev (auto-detected, in-memory) |
-| **Neon PostgreSQL** | Serverless cloud DB, SSL auto-configured |
-| **Interaction logging** | Every query logged to PostgreSQL for analytics |
-| **Admin API** | Stats, user list, interaction history |
-| **CLI simulator** | Full USSD session testing locally — no Africa's Talking needed |
-| **Alembic migrations** | Async-compatible schema versioning |
-| **Test suite** | 23 async tests, fully mocked (no external services required) |
-
-### 🔜 Phase 2 — Planned
-
-| Feature | Detail |
-|---|---|
-| Kinyarwanda support | Full menus + AI responses in Kinyarwanda |
-| Swahili + French | Additional language options |
-| Admin dashboard | React/Next.js analytics panel |
-| Daily tip broadcast | Scheduled SMS to opted-in users |
-| Voice / IVR | Speech-to-text over phone calls |
-| Market prices | Live crop prices from agricultural APIs |
 
 ---
 
@@ -197,40 +151,101 @@ Any mobile phone dials *123#
 ```bash
 git clone https://github.com/manziosee/ussd.git
 cd ussd
-cp .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` (key entries):
 
 ```env
-# AI (required for free-form questions)
-ANTHROPIC_API_KEY=sk-ant-...
+# AI (Groq — free tier available at console.groq.com)
+GROQ_API_KEY=gsk_...
+GROQ_MODEL=llama-3.1-8b-instant
 
-# Africa's Talking
-AT_USERNAME=sandbox
-AT_API_KEY=your_sandbox_key
-AT_SHORTCODE=12345
-AT_ENVIRONMENT=sandbox
-
-# Database — Neon (recommended) or local PostgreSQL
+# Database — Neon (free at neon.tech) or local Docker
 DATABASE_URL=postgresql+asyncpg://user:pass@host/dbname
+
+# SMS Gateway (points to the sms-gateway Docker service)
+SMS_GATEWAY_URL=http://sms-gateway:8001
+
+# Jasmin connector routing
+SMS_GW_JASMIN_HOST=jasmin
+SMS_GW_CONNECTOR_MAP_JSON={"250":"mtn_rw","254":"safaricom_ke"}
+
+# USSD webhook security (leave empty for local dev / AT sandbox)
+AT_API_KEY=
+AT_WEBHOOK_TOKEN=
 ```
 
-### 2. Install and run
+### 2. Run with Docker Compose
 
 ```bash
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+docker-compose up -d
 ```
 
-> **No Redis? No problem.** The server auto-detects when Redis is unavailable
-> and falls back to an in-memory `fakeredis` store — perfect for development.
+This starts: PostgreSQL · Redis · RabbitMQ · Jasmin · SMS Gateway · USSD App.
 
-> **Database options:**
-> - **Neon** (recommended) — free serverless PostgreSQL at [neon.tech](https://neon.tech). SSL is configured automatically.
-> - **Docker** — run `docker compose up db redis -d` for local PostgreSQL + Redis.
+```
+Service          URL
+───────────────────────────────────────────────────────
+USSD app         http://localhost:8000
+SMS Gateway      http://localhost:8001
+Admin dashboard  http://localhost:8000/admin/dashboard?key=<ADMIN_API_KEY>
+API docs         http://localhost:8000/docs
+RabbitMQ UI      http://localhost:15672  (jasmin / jasmin)
+Jasmin CLI       telnet localhost 8990   (admin / admin)
+```
 
-### 3. Test with the CLI simulator
+### 3. Configure Jasmin SMPP connectors
+
+Connect to the Jasmin CLI and add one connector per telecom operator:
+
+```bash
+telnet localhost 8990
+# Login: admin / admin
+
+# Add a connector for MTN Rwanda
+smppccm -a
+> cid mtn_rw
+> host smpp.mtn.rw
+> port 2775
+> username your_smpp_user
+> password your_smpp_pass
+> systype MTN
+> ok
+
+# Add an MT (Mobile Terminated) route so messages use this connector
+mtrouter -a
+> order 10
+> type DefaultRoute
+> connector smppc(mtn_rw)
+> ok
+
+# Persist and start
+persist
+smppccm -1 mtn_rw
+quit
+```
+
+> **Test mode:** If you don't have real SMPP credentials yet, run Jasmin in loopback mode using `smpp.ozekisms.com:9500` as a free public test SMPP server.
+
+### 4. Run without Docker (development)
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Start USSD app (uses fakeredis if Redis unavailable)
+uvicorn app.main:app --reload --port 8000
+
+# Start SMS Gateway (separate terminal)
+cd sms_gateway
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8001
+```
+
+> **No Redis?** The server auto-detects unavailability and falls back to an in-memory
+> `fakeredis` store — zero config for development.
+
+### 5. Test with the CLI simulator
 
 ```bash
 python simulator/cli_sim.py
@@ -243,110 +258,94 @@ python simulator/cli_sim.py
   Phone : +250788123456
   Server: http://localhost:8000
 
-┌──────────────────────────────────────┐
-│  SmartAssist AI                      │
-│  1.Business                          │
-│  2.Farming                           │
-│  3.Health                            │
-│  4.Education                         │
-│  5.Ask AI                            │
-│  6.Account                           │
-└──────────────────────────────────────┘
+┌────────────────────────────────────┐
+│  Welcome to SmartAssist!           │
+│  Choose language:                  │
+│  1.English                         │
+│  2.Kinyarwanda                     │
+└────────────────────────────────────┘
   Your input: _
 ```
 
-### 4. Run tests
+### 6. Run tests
 
 ```bash
 pytest
 ```
 
-All 23 tests pass with no external services required (Redis, DB, and AI are all mocked).
+All 45 tests pass with no external services (Redis, DB, AI, Jasmin all mocked).
 
 ---
 
-## Africa's Talking Setup
+## SMS Gateway API
 
-### Sandbox (development)
+The SMS Gateway runs as a separate microservice on port 8001.
 
-1. Sign up at [africastalking.com](https://africastalking.com)
-2. Go to **Sandbox → USSD → Create channel** (e.g. `*384*72275#`)
-3. Set the callback URL to your server: `https://your-server.com/ussd`
-4. Test using AT's built-in simulator
-
-### Expose localhost with ngrok
+### Send a single SMS
 
 ```bash
-ngrok http 8000
-# Paste the HTTPS URL into your AT USSD channel callback
-```
-
-### Go to production
-
-```env
-AT_ENVIRONMENT=production
-AT_USERNAME=your_live_username
-AT_API_KEY=your_live_key
-```
-
----
-
-## API Reference
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/ussd` | Africa's Talking USSD webhook (form-encoded) |
-| `POST` | `/simulate` | Local simulator — JSON body |
-| `GET` | `/admin/stats` | Aggregated analytics |
-| `GET` | `/admin/users` | User list (paginated) |
-| `GET` | `/admin/interactions` | Interaction history (paginated, filterable by category) |
-| `GET` | `/health` | Health check |
-| `GET` | `/docs` | Swagger UI |
-
-### Example — `/simulate`
-
-```bash
-curl -X POST http://localhost:8000/simulate \
+curl -X POST http://localhost:8001/sms/send \
   -H "Content-Type: application/json" \
-  -d '{"phone_number": "+250788000001", "text": "2*3", "session_id": "s1"}'
+  -d '{"to": "+250788000001", "message": "Hello from SmartAssist!"}'
 ```
-
-```
-END Plant beans alongside maize — beans add nitrogen to soil and sell
-year-round. Kale and spinach grow in 30 days and have steady local demand.
-```
-
-### Example — `/admin/stats`
 
 ```json
 {
-  "total_users": 1,
-  "total_interactions": 4,
-  "total_tokens_used": 0,
-  "cache_hit_rate": 1.0,
-  "sms_sent": 0,
-  "interactions_by_category": {
-    "business": 1,
-    "farming": 1,
-    "health": 1,
-    "education": 1
-  }
+  "success": true,
+  "message_id": "01234-5678-uuid",
+  "connector": "mtn_rw",
+  "country_code": "250",
+  "error": null
 }
 ```
 
-> `total_tokens_used: 0` and `cache_hit_rate: 1.0` — all responses served from
-> the offline knowledge seed cache. Zero AI API cost.
+### Send bulk (daily tips)
+
+```bash
+curl -X POST http://localhost:8001/sms/send-bulk \
+  -H "Content-Type: application/json" \
+  -d '{
+    "recipients": ["+250788000001", "+254700000001", "+256700000001"],
+    "message": "Daily tip: Set price = cost + 30% profit min.",
+    "sender_id": "SmartAssist"
+  }'
+```
+
+```json
+{"sent": 3, "failed": 0, "results": [...]}
+```
+
+### Gateway health
+
+```bash
+curl http://localhost:8001/health
+```
+
+```json
+{"status": "ok", "jasmin_reachable": true, "version": "1.0.0"}
+```
 
 ---
 
-## Cost Model
+## Admin API
 
-| Scenario | API Cost |
-|---|---|
-| Pre-defined topic (1–4 in any category) | **$0** — knowledge seed cache |
-| Same free question asked again within 24 h | **$0** — Redis response cache |
-| New free-form question | **< $0.0005** — Claude Haiku + prompt cache |
-| **Blended average** | **< $0.0001 per interaction** |
+All admin routes require `X-Admin-Key: <ADMIN_API_KEY>` header (or `?key=` for browser).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/admin/dashboard` | HTML dashboard with charts |
+| `GET` | `/admin/stats` | Aggregated analytics (users, queries, cache rate) |
+| `GET` | `/admin/interactions` | Query history (paginated, filterable) |
+| `GET` | `/admin/users` | User list |
+| `GET` | `/admin/market-prices` | Crop price list |
+| `PUT` | `/admin/market-prices` | Upsert a crop price |
+| `POST` | `/admin/market-prices/bulk` | Bulk upsert market prices |
+| `DELETE` | `/admin/market-prices/{id}` | Delete a price entry |
+| `GET` | `/admin/feedback` | Helpful vs not-helpful counts by category |
+| `POST` | `/ussd` | AT USSD webhook (form-encoded) |
+| `POST` | `/simulate` | Local USSD simulator (JSON) |
+| `GET` | `/health` | Health check |
+| `GET` | `/docs` | Swagger UI |
 
 ---
 
@@ -354,67 +353,97 @@ year-round. Kale and spinach grow in 30 days and have steady local demand.
 
 ```
 ussd/
-├── app/
-│   ├── main.py                  # FastAPI app, lifespan, startup validation
-│   ├── config.py                # All settings via pydantic-settings + .env
-│   ├── database.py              # Async SQLAlchemy, Neon SSL auto-config
+├── app/                          # ── USSD Application ──────────────────────
+│   ├── main.py                   # FastAPI app, lifespan, startup validation
+│   ├── config.py                 # All settings via pydantic-settings + .env
+│   ├── auth.py                   # USSD webhook token + HMAC guard
+│   ├── database.py               # Async SQLAlchemy, Neon SSL auto-config
 │   ├── models/
-│   │   ├── user.py              # User profile (phone, name, profession, language)
-│   │   └── interaction.py       # AI query log (tokens, cache hit, SMS sent)
+│   │   ├── user.py               # Phone · name · profession · language · onboarded
+│   │   ├── interaction.py        # AI query log (tokens, cache hit, SMS sent)
+│   │   ├── market_price.py       # Crop prices per district
+│   │   └── feedback.py           # User helpful/not-helpful ratings
 │   ├── services/
-│   │   ├── menu_service.py      # ★ USSD state machine — core routing logic
-│   │   ├── ai_service.py        # Claude Haiku + Anthropic prompt caching
-│   │   ├── session_service.py   # Redis: sessions · AI cache · rate limit · fakeredis fallback
-│   │   ├── knowledge_service.py # 16 pre-seeded offline responses (zero API cost)
-│   │   └── sms_service.py       # Africa's Talking SMS for long responses
+│   │   ├── menu_service.py       # ★ USSD state machine (onboarding → main menu)
+│   │   ├── ai_service.py         # Groq Llama 3.1 8B + Redis response cache + retry
+│   │   ├── session_service.py    # Redis: sessions · cache · rate limit · pagination
+│   │   ├── knowledge_service.py  # 15 pre-seeded offline responses (zero API cost)
+│   │   └── sms_service.py        # HTTP client → SMS Gateway (/sms/send)
 │   ├── routes/
-│   │   ├── ussd.py              # POST /ussd + POST /simulate
-│   │   └── admin.py             # GET /admin/stats|users|interactions
+│   │   ├── ussd.py               # POST /ussd (AT webhook) + POST /simulate
+│   │   ├── admin.py              # /admin/* endpoints + HTML dashboard
+│   │   └── cron.py               # POST /cron/daily-tips
+│   ├── data/
+│   │   ├── emergency.py          # Rwanda emergency numbers (EN + Kinyarwanda)
+│   │   └── services.py           # Static agri/health/education directory
 │   └── schemas/
-│       └── ussd.py              # Pydantic schemas
+│       └── ussd.py               # Pydantic schemas
+│
+├── sms_gateway/                  # ── SMS Gateway Microservice ──────────────
+│   ├── main.py                   # FastAPI app on port 8001
+│   ├── config.py                 # Settings (SMS_GW_ prefix)
+│   ├── schemas.py                # SMSRequest · SMSResponse · BulkSMS*
+│   ├── routes/
+│   │   └── sms.py                # POST /sms/send · POST /sms/send-bulk · GET /health
+│   ├── services/
+│   │   ├── jasmin_client.py      # Jasmin HTTP API client + GSM7/UCS-2 detection
+│   │   └── routing.py            # Country code → Jasmin connector name
+│   ├── requirements.txt
+│   └── Dockerfile
+│
 ├── simulator/
-│   └── cli_sim.py               # Terminal USSD simulator (no AT account needed)
+│   └── cli_sim.py                # Terminal USSD simulator (no AT account needed)
 ├── tests/
-│   ├── conftest.py              # Fixtures: mock Redis, DB, AI
-│   └── test_ussd_menu.py        # 23 async tests — all menu paths + edge cases
+│   ├── conftest.py               # Fixtures: mock Redis, DB, AI
+│   ├── test_ussd_menu.py         # 30 async tests — all menu paths + edge cases
+│   └── test_admin_routes.py      # 15 async tests — admin API + auth
 ├── alembic/
-│   └── env.py                   # Async-compatible Alembic environment
-├── docker-compose.yml           # PostgreSQL 16 + Redis 7 (optional, for local dev)
-├── Dockerfile                   # Production container
-├── requirements.txt
+│   └── versions/                 # 4 migrations (users → interactions → market/feedback → onboarded)
+├── docker-compose.yml            # Full stack: db · redis · rabbitmq · jasmin · sms-gw · app
+├── docker-compose.dev.yml        # Hot-reload override
+├── Dockerfile                    # Production app container
+├── requirements.txt              # Main app dependencies
 ├── alembic.ini
 ├── pytest.ini
-└── .env.example
+└── .env
 ```
 
 ---
 
-## Live Test Results
+## Cost Model
 
-Tested against **Neon PostgreSQL** + **fakeredis** (no Docker required):
-
-| Test case | Input | Response |
-|---|---|---|
-| Fresh dial | `""` | `CON SmartAssist AI…` |
-| Business menu | `"1"` | `CON Business Advisor…` |
-| Pricing tip | `"1*1"` | `END Add total cost + 30% profit…` |
-| Farming — best crops | `"2*3"` | `END Plant beans alongside maize…` |
-| Health — hygiene | `"3*2"` | `END Wash hands with soap…` |
-| Education — study | `"4*1"` | `END Study 25 min, rest 5 min…` |
-| Set profession: farmer | `"6*3*1"` | `END Role saved: farmer…` |
-| Ask AI prompt | `"5"` | `CON Ask AI anything:…` |
-| Free question prompt | `"1*5"` | `CON Your Business question:` |
-
-All pre-defined tips served from **knowledge cache — 0 tokens used, $0 cost**.
+| Scenario | Cost |
+|---|---|
+| Pre-defined topic (1–4 in any category) | **$0** — knowledge seed cache |
+| Same free question repeated within 24 h | **$0** — Redis response cache |
+| New free-form question (Groq) | **< $0.0001** — Llama 3.1 8B at Groq pricing |
+| SMS delivery (Jasmin direct SMPP) | **~$0** (direct telecom rate, no per-msg markup) |
+| **Blended average per interaction** | **< $0.00005** |
 
 ---
 
-## Contributing
+## Features
 
-1. Fork the repo
-2. Create a feature branch: `git checkout -b feature/kinyarwanda`
-3. Add changes + tests — `pytest` must pass
-4. Open a PR
+| Feature | Detail |
+|---|---|
+| **First-time onboarding** | New users choose language + profession before main menu |
+| **USSD state machine** | 5 categories, unlimited depth, input sanitisation |
+| **Groq AI** | Llama 3.1 8B, ~50 ms median latency, 3-attempt retry with back-off |
+| **Redis response cache** | Same answer cached 24 h — zero API cost on repeated questions |
+| **Offline knowledge seed** | 15 pre-written responses at startup — zero latency & zero cost |
+| **SMS via Jasmin** | Own SMPP infrastructure; country-code routing; GSM7/UCS-2 auto-detect |
+| **Bulk SMS** | Daily tip broadcasts to all opted-in subscribers |
+| **USSD pagination** | Long AI answers split into 160-char pages with 1.Next / 0.Stop |
+| **Market prices** | Real Rwanda crop prices from DB (5 districts × 6 crops) |
+| **Feedback rating** | Helpful / Not helpful stored per tip; admin aggregate view |
+| **Emergency numbers** | Health menu option 7 — Rwanda police/ambulance/fire in EN + RW |
+| **Kinyarwanda support** | Menus + AI + SMS in Kinyarwanda; UCS-2 encoding auto-detected |
+| **Session resume** | Drop and redial within 10 min offers to resume where you left off |
+| **Rate limiting** | 50 queries / phone / hour via Redis INCR |
+| **Dedup protection** | AT retry callbacks return cached reply, not a second AI call |
+| **Admin dashboard** | HTML dashboard with Chart.js + JSON API |
+| **Alembic migrations** | Async-compatible, 4 migrations applied to Neon DB |
+| **45-test suite** | Menu + admin routes, fully mocked, no external services needed |
 
 ---
 

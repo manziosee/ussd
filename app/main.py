@@ -45,8 +45,8 @@ def _validate_env() -> None:
 
     if not settings.groq_api_key:
         warnings.append("  • GROQ_API_KEY not set — AI responses will fail (menu navigation still works)")
-    if not settings.at_api_key or settings.at_api_key == "your_api_key":
-        warnings.append("  • AT_API_KEY not set — SMS sending disabled")
+    if not settings.sms_gateway_url:
+        warnings.append("  • SMS_GATEWAY_URL not set — SMS fallback disabled")
     if settings.secret_key == "change-this-in-production" and not settings.debug:
         warnings.append("  • SECRET_KEY should be changed for production")
 
