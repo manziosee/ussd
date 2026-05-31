@@ -668,7 +668,7 @@ async def _handle_market_prices(
     district_label = DISTRICT_LABELS.get(district, district.capitalize())
     lines = [f"END {district_label} Market Prices"]
     for p in prices[:6]:
-        lines.append(f"{p.crop}: {p.price_rwf:,} RWF/{p.unit}")
+        lines.append(f"{p.crop}: {p.price:,} {p.currency}/{p.unit}")
 
     # Add last-updated timestamp from most recent entry
     latest = max(p.updated_at for p in prices)
@@ -683,8 +683,8 @@ async def _handle_market_prices(
 # ── Emergency numbers (Health menu option 7) ──────────────────────────────────
 
 def _handle_emergency(language: str = "en") -> str:
-    from ..data.emergency import EMERGENCY_EN, EMERGENCY_RW
-    return EMERGENCY_RW if language == "rw" else EMERGENCY_EN
+    from ..data.emergency import get_emergency_text
+    return get_emergency_text(language, settings.ussd_shortcode)
 
 
 # ── Financial calculator (Business menu option 6) ──────────────────────────────

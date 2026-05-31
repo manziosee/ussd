@@ -165,7 +165,7 @@ async def test_list_market_prices_empty(admin_client):
 async def test_upsert_market_price_creates_row(admin_client, admin_db):
     """PUT creates a new row when none exists; verifies db.add and db.commit called."""
     # scalar_one_or_none already returns None (no existing row)
-    payload = {"district": "kigali", "crop": "Maize", "unit": "kg", "price_rwf": 400}
+    payload = {"district": "kigali", "crop": "Maize", "unit": "kg", "price": 400}
 
     # After db.refresh we need the new_row to look like a valid MarketPriceOut.
     # Simulate by capturing the added object and setting its attributes.
@@ -194,7 +194,8 @@ async def test_upsert_market_price_updates_existing(admin_client, admin_db):
     existing.district = "kigali"
     existing.crop = "Maize"
     existing.unit = "kg"
-    existing.price_rwf = 350
+    existing.price = 350
+    existing.currency = "RWF"
     existing.updated_by = None
     existing.updated_at = datetime(2026, 5, 1, tzinfo=timezone.utc)
 
@@ -202,7 +203,7 @@ async def test_upsert_market_price_updates_existing(admin_client, admin_db):
     result_with_row.scalar_one_or_none = MagicMock(return_value=existing)
     admin_db.execute = AsyncMock(return_value=result_with_row)
 
-    payload = {"district": "kigali", "crop": "Maize", "unit": "kg", "price_rwf": 420}
+    payload = {"district": "kigali", "crop": "Maize", "unit": "kg", "price": 420}
     r = await admin_client.put("/admin/market-prices", json=payload)
     assert r.status_code == 200
     admin_db.commit.assert_awaited()
@@ -234,8 +235,8 @@ async def test_delete_market_price_ok(admin_client, admin_db):
 async def test_bulk_upsert_market_prices(admin_client, admin_db):
     """POST /admin/market-prices/bulk accepts a list and calls commit once."""
     payload = [
-        {"district": "kigali",  "crop": "Maize", "unit": "kg", "price_rwf": 400},
-        {"district": "musanze", "crop": "Beans", "unit": "kg", "price_rwf": 700},
+        {"district": "kigali",  "crop": "Maize", "unit": "kg", "price": 400},
+        {"district": "musanze", "crop": "Beans", "unit": "kg", "price": 700},
     ]
 
     added: list = []

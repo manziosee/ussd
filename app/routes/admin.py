@@ -163,7 +163,8 @@ async def upsert_market_price(
             update(MarketPrice)
             .where(MarketPrice.id == row.id)
             .values(
-                price_rwf=data.price_rwf,
+                price=data.price,
+                currency=data.currency,
                 unit=data.unit,
                 updated_by=data.updated_by,
                 updated_at=func.now(),
@@ -176,7 +177,8 @@ async def upsert_market_price(
         district=data.district.lower(),
         crop=data.crop,
         unit=data.unit,
-        price_rwf=data.price_rwf,
+        price=data.price,
+        currency=data.currency,
         updated_by=data.updated_by,
     )
     db.add(new_row)
@@ -209,7 +211,7 @@ async def bulk_upsert_market_prices(
             await db.execute(
                 update(MarketPrice)
                 .where(MarketPrice.id == row.id)
-                .values(price_rwf=item.price_rwf, unit=item.unit,
+                .values(price=item.price, currency=item.currency, unit=item.unit,
                         updated_by=item.updated_by, updated_at=func.now())
             )
             results.append(row)
@@ -218,7 +220,8 @@ async def bulk_upsert_market_prices(
                 district=item.district.lower(),
                 crop=item.crop,
                 unit=item.unit,
-                price_rwf=item.price_rwf,
+                price=item.price,
+                currency=item.currency,
                 updated_by=item.updated_by,
             )
             db.add(new_row)
