@@ -16,19 +16,19 @@ def get_emergency_text(language: str = "en", shortcode: str = "*123#") -> str:
     if language == "rw":
         return (
             "END Inomero za Gihutisha\n\n"
-            "Polisi:              112\n"
-            "Ambulansi:           912\n"
-            "Inkongi z'Umuriro:   110\n"
-            "Indishutiro ya CHUK: +250788603600\n\n"
-            "Mu kaga: Vugisha 112 (Polisi)\n"
+            "Polisi:              +1-555-0100\n"
+            "Ambulansi:           +1-555-0199\n"
+            "Inkongi z'Umuriro:   +1-555-0133\n"
+            "Indishutiro:         +1-555-0177\n\n"
+            "Mu kaga: Vugisha +1-555-0100\n"
             f"Vugisha {shortcode} kubona inama."
         )
     return (
         "END Emergency Numbers\n\n"
-        "Police:       112\n"
-        "Ambulance:    912\n"
-        "Fire Service: 110\n"
-        "Hospital ER:  +250788603600\n\n"
-        "If in danger: Call 112\n"
+        "Police:       +1-555-0100\n"
+        "Ambulance:    +1-555-0199\n"
+        "Fire Service: +1-555-0133\n"
+        "Hospital ER:  +1-555-0177\n\n"
+        "If in danger: Call +1-555-0100\n"
         f"Dial {shortcode} for health tips."
     )
