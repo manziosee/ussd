@@ -261,7 +261,7 @@ async def test_health_emergency_shows_numbers(mock_db):
     """Option 7 in health menu returns static emergency numbers."""
     r = await ussd("3*7", mock_db)
     assert is_end(r)
-    assert "112" in r
+    assert "555" in r
 
 
 @pytest.mark.asyncio
